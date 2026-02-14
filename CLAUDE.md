@@ -500,6 +500,18 @@ Detailed project plans, sprint tasks, and phase milestones live in **`docs/plans
 
 Phases at a glance: (1) Data Understanding & Validation → (2) Feature Engineering & EDA → (3) Baseline Models & Backtesting → (4) Advanced Models & Edge Discovery → (5) Weekly Pipeline for 2026 → (6) Extensibility.
 
+**IMPORTANT: Roadmap Update Protocol**
+
+As you complete tasks, you MUST update `docs/plans/roadmap.md` immediately:
+
+1. **Mark tasks complete**: Change `[ ]` to `[x]` when a task is fully done
+2. **Update "Last Updated" date**: Set to current date when making changes
+3. **Add discovered tasks**: If implementation reveals new subtasks, add them to the roadmap
+4. **Update "Current Phase"**: Change the active phase when transitioning between phases
+5. **Document blockers**: If a task is blocked, add a note explaining why
+
+This ensures the roadmap is always an accurate reflection of project state, not a stale document.
+
 ---
 
 ## 11. Staking & Risk Parameters
