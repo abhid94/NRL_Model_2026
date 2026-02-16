@@ -195,7 +195,8 @@ def compute_lineup_stability_features(
     query = f"""
     WITH current_lineups AS (
         -- Get starting 17 for each match (jerseys 1-17)
-        SELECT
+        -- Use DISTINCT to handle duplicate entries in team_lists (data quality issue)
+        SELECT DISTINCT
             tl.match_id,
             tl.squad_id,
             tl.round_number,
@@ -295,6 +296,10 @@ def compute_lineup_stability_features(
     """
 
     df = pd.read_sql_query(query, conn)
+
+    # Deduplicate in case of data quality issues in team_lists
+    # (Some players appear multiple times in the same match)
+    df = df.drop_duplicates(subset=['match_id', 'player_id', 'squad_id'], keep='first')
 
     return df
 

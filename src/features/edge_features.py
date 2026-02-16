@@ -468,31 +468,32 @@ def add_player_edge_features(
         season=season, max_round=max_round, window=window
     )
 
-    # Get opponent squad_id for each player observation
-    round_filter = f"AND round_number < {max_round}" if max_round else ""
-    opponent_query = f"""
-    SELECT
-        match_id,
-        home_squad_id AS squad_id,
-        away_squad_id AS opponent_squad_id
-    FROM matches_{season}
-    WHERE 1=1
-        {round_filter}
-    UNION ALL
-    SELECT
-        match_id,
-        away_squad_id AS squad_id,
-        home_squad_id AS opponent_squad_id
-    FROM matches_{season}
-    WHERE 1=1
-        {round_filter}
-    """
+    # Get opponent squad_id for each player observation (if not already present)
+    if "opponent_squad_id" not in player_df.columns:
+        round_filter = f"AND round_number < {max_round}" if max_round else ""
+        opponent_query = f"""
+        SELECT
+            match_id,
+            home_squad_id AS squad_id,
+            away_squad_id AS opponent_squad_id
+        FROM matches_{season}
+        WHERE 1=1
+            {round_filter}
+        UNION ALL
+        SELECT
+            match_id,
+            away_squad_id AS squad_id,
+            home_squad_id AS opponent_squad_id
+        FROM matches_{season}
+        WHERE 1=1
+            {round_filter}
+        """
 
-    with get_connection() as conn:
-        opponents = fetch_df(conn, opponent_query)
+        with get_connection() as conn:
+            opponents = fetch_df(conn, opponent_query)
 
-    # Join opponent info
-    player_df = player_df.merge(opponents, on=["match_id", "squad_id"], how="left")
+        # Join opponent info
+        player_df = player_df.merge(opponents, on=["match_id", "squad_id"], how="left")
 
     # Join team's edge attack profiles
     player_df = player_df.merge(

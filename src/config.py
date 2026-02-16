@@ -62,6 +62,24 @@ JERSEY_NUMBER_POSITION: Mapping[int, PositionInfo] = {
 
 DEFAULT_RESERVE_POSITION = PositionInfo("RES", "Reserve")
 
+# ---------------------------------------------------------------------------
+# Staking & Risk Parameters (CLAUDE.md Section 11)
+# ---------------------------------------------------------------------------
+DEFAULT_INITIAL_BANKROLL: float = 10_000.0
+DEFAULT_KELLY_FRACTION: float = 0.25
+MAX_STAKE_PCT: float = 0.05
+MAX_ROUND_EXPOSURE_PCT: float = 0.20
+MAX_BETS_PER_ROUND: int = 15
+MAX_BETS_PER_MATCH: int = 4
+MIN_STAKE: float = 5.0
+MIN_EDGE_THRESHOLD: float = 0.05
+
+# Position eligibility for ATS betting
+# Only bet: backs + halves + back-rowers. Never bet: props, hookers, interchange, reserves.
+ELIGIBLE_POSITION_CODES: frozenset[str] = frozenset({
+    "FB", "WG", "CE", "FE", "HB", "SR", "LK",
+})
+
 
 def position_from_jersey(jersey_number: int | None) -> PositionInfo:
     """Infer position metadata from a jersey number.
