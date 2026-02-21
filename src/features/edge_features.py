@@ -172,13 +172,11 @@ def compute_team_edge_attack_profiles(
         merged["left"] + merged["right"] + merged["middle"] + merged["other"]
     )
 
-    # Rolling window by team
+    # Rolling window by team (shift(1) to exclude current match — leakage prevention)
+    # Must use .transform() so shift AND rolling both operate within each group
     for col in ["left", "right", "middle", "other", "total_tries"]:
-        merged[f"{col}_rolling"] = (
-            merged.groupby("squad_id")[col]
-            .rolling(window=window, min_periods=1)
-            .sum()
-            .reset_index(level=0, drop=True)
+        merged[f"{col}_rolling"] = merged.groupby("squad_id")[col].transform(
+            lambda s: s.shift(1).rolling(window=window, min_periods=1).sum()
         )
 
     # Compute percentages (avoid division by zero)
@@ -377,13 +375,11 @@ def compute_team_edge_defence_profiles(
         result["left"] + result["right"] + result["middle"] + result["other"]
     )
 
-    # Compute rolling sums
+    # Compute rolling sums (shift(1) to exclude current match — leakage prevention)
+    # Must use .transform() so shift AND rolling both operate within each group
     for col in ["left", "right", "middle", "other", "total_conceded"]:
-        result[f"{col}_rolling"] = (
-            result.groupby("squad_id")[col]
-            .rolling(window=window, min_periods=1)
-            .sum()
-            .reset_index(level=0, drop=True)
+        result[f"{col}_rolling"] = result.groupby("squad_id")[col].transform(
+            lambda s: s.shift(1).rolling(window=window, min_periods=1).sum()
         )
 
     # Rename to conceded_to_*

@@ -164,7 +164,8 @@ def extract_betfair_odds(
         best_back_price_30_min_prior,
         best_back_price_60_min_prior,
         best_lay_price_1_min_prior,
-        total_matched_volume
+        total_matched_volume,
+        matched_volume_1_min_prior
     FROM betfair_markets_{year}
     WHERE market_type = 'TO_SCORE'
         AND AD_match_id = ?
@@ -208,12 +209,35 @@ def extract_betfair_odds(
     else:
         matched_volume = np.nan
 
+    # Price movement: ratio of 60-min-prior price to closing price
+    # Values > 1.0 = price drifted (got longer), < 1.0 = price shortened (steamed in)
+    price_movement = np.nan
+    try:
+        price_60 = row.get('best_back_price_60_min_prior')
+        if pd.notna(price_60) and price_60 != '' and closing_odds > 0:
+            price_60 = float(price_60)
+            if price_60 > 0:
+                price_movement = price_60 / closing_odds
+    except (ValueError, TypeError):
+        pass
+
+    # Late matched volume (1 min prior) — more precise timing signal
+    late_volume = np.nan
+    try:
+        vol_1min = row.get('matched_volume_1_min_prior')
+        if pd.notna(vol_1min) and vol_1min != '':
+            late_volume = float(vol_1min)
+    except (ValueError, TypeError):
+        pass
+
     return pd.Series({
         'betfair_closing_odds': closing_odds,
         'betfair_implied_prob': implied_prob,
         'betfair_odds_source': odds_source,
         'betfair_total_matched_volume': matched_volume,
-        'betfair_spread': spread
+        'betfair_spread': spread,
+        'betfair_price_movement': price_movement,
+        'betfair_late_volume': late_volume,
     })
 
 
@@ -285,7 +309,9 @@ def add_betfair_odds_features(
         'betfair_implied_prob',
         'betfair_odds_source',
         'betfair_total_matched_volume',
-        'betfair_spread'
+        'betfair_spread',
+        'betfair_price_movement',
+        'betfair_late_volume',
     ]
     for col in odds_cols:
         df[col] = np.nan
@@ -311,6 +337,11 @@ def add_betfair_odds_features(
     # Clean up temp column if we created it
     if year is not None:
         df = df.drop(columns=['_temp_year'])
+
+    # Compute within-match volume rank (higher volume = lower rank number = more market attention)
+    df['betfair_volume_rank'] = df.groupby('match_id')['betfair_total_matched_volume'].rank(
+        method='min', ascending=False, na_option='bottom'
+    )
 
     # Log coverage stats
     coverage_pct = (extracted_count / len(df)) * 100

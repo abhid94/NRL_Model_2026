@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from sqlite3 import Connection
 from typing import Sequence
 
+import numpy as np
 import pandas as pd
 
 from .. import db
@@ -51,7 +52,22 @@ class PlayerFeatureConfig:
         "tries",
         "try_assists",
         "line_breaks",
+        "line_break_assists",
         "run_metres",
+        "tackle_breaks",
+        "post_contact_metres",
+        "offloads",
+        "missed_tackles",
+        "tackles",
+        "errors",
+        "passes",
+        "possessions",
+        "kicks_general_play",
+        "kick_metres",
+        "runs_hitup",
+        "runs_dummy_half",
+        "bomb_kicks_caught",
+        "penalties_conceded",
     )
     include_recent_form: bool = True
     fillna_value: float | None = 0.0
@@ -88,7 +104,22 @@ def fetch_player_match_stats(
             ps.tries,
             ps.try_assists,
             ps.line_breaks,
+            ps.line_break_assists,
             ps.run_metres,
+            ps.tackle_breaks,
+            ps.post_contact_metres,
+            ps.offloads,
+            ps.missed_tackles,
+            ps.tackles,
+            ps.errors,
+            ps.passes,
+            ps.possessions,
+            ps.kicks_general_play,
+            ps.kick_metres,
+            ps.runs_hitup,
+            ps.runs_dummy_half,
+            ps.bomb_kicks_caught,
+            ps.penalties_conceded,
             m.round_number,
             m.home_squad_id
         FROM {player_stats} ps
@@ -136,7 +167,10 @@ def compute_player_features(
         raise ValueError("No player stats found for the requested season.")
 
     if as_of_round is not None:
-        stats = stats[stats["round_number"] < as_of_round].copy()
+        # Include the current round so rows exist for output filtering.
+        # shift(1) in _rolling_feature ensures current round's stats don't
+        # leak into rolling features — only prior rounds contribute.
+        stats = stats[stats["round_number"] <= as_of_round].copy()
 
     stats.sort_values(["player_id", "round_number", "match_id"], inplace=True)
 
@@ -193,3 +227,86 @@ def compute_player_features(
         as_of_round,
     )
     return features.reset_index(drop=True)
+
+
+def compute_cross_season_priors(
+    connection: Connection,
+    target_year: int | str,
+) -> pd.DataFrame:
+    """Compute prior-season aggregate stats for each player.
+
+    For each player appearing in ``target_year``, computes full-season
+    aggregates from ``target_year - 1``.  These fill the cold-start gap
+    in early rounds where rolling windows are empty.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Database connection.
+    target_year : int | str
+        The season to produce priors for.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns: player_id, prior_season_try_rate, prior_season_matches,
+        prior_season_avg_line_breaks, prior_season_avg_tackle_breaks,
+        prior_season_avg_run_metres, prior_season_avg_try_assists.
+        One row per player.  Players without prior-season data are excluded.
+    """
+    prior_year = db.normalize_year(target_year) - 1
+    prior_stats = db.get_table("player_stats", prior_year)
+    prior_matches = db.get_table("matches", prior_year)
+
+    query = f"""
+        SELECT
+            ps.player_id,
+            ps.tries,
+            ps.line_breaks,
+            ps.tackle_breaks,
+            ps.run_metres,
+            ps.try_assists
+        FROM {prior_stats} ps
+        JOIN {prior_matches} m ON ps.match_id = m.match_id
+        WHERE m.match_type = 'H'
+    """
+    try:
+        prior = db.fetch_df(connection, query)
+    except Exception:
+        LOGGER.warning("No prior-season data for year %s", prior_year)
+        return pd.DataFrame(columns=[
+            "player_id",
+            "prior_season_try_rate",
+            "prior_season_matches",
+            "prior_season_avg_line_breaks",
+            "prior_season_avg_tackle_breaks",
+            "prior_season_avg_run_metres",
+            "prior_season_avg_try_assists",
+        ])
+
+    if prior.empty:
+        return pd.DataFrame(columns=[
+            "player_id",
+            "prior_season_try_rate",
+            "prior_season_matches",
+            "prior_season_avg_line_breaks",
+            "prior_season_avg_tackle_breaks",
+            "prior_season_avg_run_metres",
+            "prior_season_avg_try_assists",
+        ])
+
+    agg = prior.groupby("player_id").agg(
+        prior_season_matches=("tries", "count"),
+        prior_season_try_rate=("tries", lambda x: (x > 0).mean()),
+        prior_season_avg_line_breaks=("line_breaks", "mean"),
+        prior_season_avg_tackle_breaks=("tackle_breaks", "mean"),
+        prior_season_avg_run_metres=("run_metres", "mean"),
+        prior_season_avg_try_assists=("try_assists", "mean"),
+    ).reset_index()
+
+    LOGGER.info(
+        "Computed cross-season priors for %d players (prior season=%s)",
+        len(agg),
+        prior_year,
+    )
+    return agg

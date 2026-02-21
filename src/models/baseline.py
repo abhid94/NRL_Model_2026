@@ -555,6 +555,96 @@ class MarketImpliedStrategy(BaseStrategy):
         return bets
 
 
+class RefinedEdgeStrategy(BaseStrategy):
+    """Multi-condition bet selection combining model edge with segment filters.
+
+    Requires ALL conditions to be met:
+    - Model edge >= min_edge
+    - Position in allowed set
+    - Odds in specified range
+    - Expected team tries above threshold (if available)
+
+    Parameters
+    ----------
+    min_edge : float
+        Minimum model-vs-market edge.
+    positions : frozenset[str]
+        Allowed position codes.
+    min_odds : float
+        Minimum closing odds.
+    max_odds : float
+        Maximum closing odds.
+    min_team_tries : float
+        Minimum expected team tries (context feature).
+    """
+
+    def __init__(
+        self,
+        min_edge: float = 0.05,
+        positions: frozenset[str] | None = None,
+        min_odds: float = 2.0,
+        max_odds: float = 5.0,
+        min_team_tries: float = 4.0,
+    ) -> None:
+        self._min_edge = min_edge
+        self._positions = positions or frozenset({"FB", "WG", "CE", "FE", "HB"})
+        self._min_odds = min_odds
+        self._max_odds = max_odds
+        self._min_team_tries = min_team_tries
+
+    @property
+    def name(self) -> str:
+        return "RefinedEdge"
+
+    def select_bets(
+        self,
+        predictions: pd.DataFrame,
+        model: BaseModel | None = None,
+    ) -> list[BetRecommendation]:
+        if model is None:
+            raise ValueError("RefinedEdgeStrategy requires a model")
+
+        mask = _eligible_mask(predictions)
+        df = predictions[mask].copy()
+        if df.empty:
+            return []
+
+        model_probs = model.predict_proba(df)
+        df = df.copy()
+        df["model_prob"] = model_probs
+        df["edge"] = df["model_prob"] - df["betfair_implied_prob"]
+
+        # Apply all filters
+        selected = df[
+            (df["edge"] >= self._min_edge)
+            & (df["position_code"].isin(self._positions))
+            & (df["betfair_closing_odds"] >= self._min_odds)
+            & (df["betfair_closing_odds"] <= self._max_odds)
+        ]
+
+        # Team tries filter (if feature available)
+        team_tries_col = "expected_team_tries_5"
+        if team_tries_col in selected.columns and selected[team_tries_col].notna().any():
+            # Only apply to rows that have the feature
+            has_feat = selected[team_tries_col].notna()
+            selected = selected[
+                (~has_feat) | (selected[team_tries_col] >= self._min_team_tries)
+            ]
+
+        bets = []
+        for _, row in selected.iterrows():
+            bets.append(BetRecommendation(
+                match_id=int(row["match_id"]),
+                player_id=int(row["player_id"]),
+                model_prob=float(row["model_prob"]),
+                implied_prob=float(row["betfair_implied_prob"]),
+                odds=float(row["betfair_closing_odds"]),
+                edge=float(row["edge"]),
+                position_code=str(row["position_code"]),
+            ))
+        return bets
+
+
 class CompositeStrategy(BaseStrategy):
     """Combines multiple strategies, deduplicates by (match_id, player_id), keeps highest edge."""
 
@@ -582,3 +672,169 @@ class CompositeStrategy(BaseStrategy):
                 if key not in all_bets or bet.edge > all_bets[key].edge:
                     all_bets[key] = bet
         return list(all_bets.values())
+
+
+class MarketBlendedStrategy(BaseStrategy):
+    """Blend model predictions with market probabilities, then bet on edge.
+
+    Uses ``blended_prob = alpha * model_prob + (1 - alpha) * market_prob``.
+    Edge = blended_prob - market_prob. This produces smaller but more
+    reliable edges by anchoring to the market.
+
+    Parameters
+    ----------
+    alpha : float
+        Weight on model (0.0 = pure market, 1.0 = pure model).
+    min_edge : float
+        Minimum blended edge to bet.
+    positions : frozenset[str] | None
+        Allowed position codes.
+    min_odds : float
+        Minimum closing odds.
+    max_odds : float
+        Maximum closing odds.
+    """
+
+    def __init__(
+        self,
+        alpha: float = 0.3,
+        min_edge: float = 0.03,
+        positions: frozenset[str] | None = None,
+        min_odds: float = 1.5,
+        max_odds: float = 6.0,
+    ) -> None:
+        self._alpha = alpha
+        self._min_edge = min_edge
+        self._positions = positions or frozenset({"FB", "WG", "CE", "FE", "HB", "SR", "LK"})
+        self._min_odds = min_odds
+        self._max_odds = max_odds
+
+    @property
+    def name(self) -> str:
+        return f"MarketBlend(a={self._alpha})"
+
+    def select_bets(
+        self,
+        predictions: pd.DataFrame,
+        model: BaseModel | None = None,
+    ) -> list[BetRecommendation]:
+        if model is None:
+            raise ValueError("MarketBlendedStrategy requires a model")
+
+        mask = _eligible_mask(predictions)
+        df = predictions[mask].copy()
+        if df.empty:
+            return []
+
+        model_probs = model.predict_proba(df)
+        df["model_prob"] = model_probs
+        df["blended_prob"] = (
+            self._alpha * df["model_prob"]
+            + (1 - self._alpha) * df["betfair_implied_prob"]
+        )
+        df["edge"] = df["blended_prob"] - df["betfair_implied_prob"]
+
+        selected = df[
+            (df["edge"] >= self._min_edge)
+            & (df["position_code"].isin(self._positions))
+            & (df["betfair_closing_odds"] >= self._min_odds)
+            & (df["betfair_closing_odds"] <= self._max_odds)
+        ]
+
+        bets = []
+        for _, row in selected.iterrows():
+            bets.append(BetRecommendation(
+                match_id=int(row["match_id"]),
+                player_id=int(row["player_id"]),
+                model_prob=float(row["blended_prob"]),
+                implied_prob=float(row["betfair_implied_prob"]),
+                odds=float(row["betfair_closing_odds"]),
+                edge=float(row["edge"]),
+                position_code=str(row["position_code"]),
+            ))
+        return bets
+
+
+class DataDrivenStrategy(BaseStrategy):
+    """Bet only in segments empirically shown profitable in both seasons.
+
+    Based on discovery analysis: Backs and Halfbacks at mid-short odds
+    with specific feature thresholds. Uses dynamic edge thresholds
+    by odds band.
+
+    Parameters
+    ----------
+    alpha : float
+        Market blending weight (0.0 = pure market, 1.0 = pure model).
+    """
+
+    # Odds bands with dynamic edge thresholds (from segment mining)
+    ODDS_BANDS = {
+        "short": (1.5, 2.5, 0.02),     # Short: small edge threshold (market accurate)
+        "mid_short": (2.5, 4.0, 0.03), # Mid-short: sweet spot from discovery
+        "mid_long": (4.0, 6.0, 0.05),  # Mid-long: need larger edge
+        "long": (6.0, 15.0, 0.07),     # Long: highest noise, highest threshold
+    }
+
+    # Eligible positions (forwards excluded from long shots)
+    ELIGIBLE_BY_BAND = {
+        "short": frozenset({"FB", "WG", "CE", "FE", "HB", "SR", "LK", "PR", "HK"}),
+        "mid_short": frozenset({"FB", "WG", "CE", "FE", "HB", "SR", "LK"}),
+        "mid_long": frozenset({"FB", "WG", "CE", "FE", "HB"}),
+        "long": frozenset({"FB", "WG", "CE"}),
+    }
+
+    def __init__(self, alpha: float = 0.3) -> None:
+        self._alpha = alpha
+
+    @property
+    def name(self) -> str:
+        return "DataDriven"
+
+    def select_bets(
+        self,
+        predictions: pd.DataFrame,
+        model: BaseModel | None = None,
+    ) -> list[BetRecommendation]:
+        if model is None:
+            raise ValueError("DataDrivenStrategy requires a model")
+
+        mask = _eligible_mask(predictions)
+        df = predictions[mask].copy()
+        if df.empty:
+            return []
+
+        model_probs = model.predict_proba(df)
+        df["model_prob"] = model_probs
+        df["blended_prob"] = (
+            self._alpha * df["model_prob"]
+            + (1 - self._alpha) * df["betfair_implied_prob"]
+        )
+        df["edge"] = df["blended_prob"] - df["betfair_implied_prob"]
+
+        bets = []
+        for _, row in df.iterrows():
+            odds = row["betfair_closing_odds"]
+            pos = row["position_code"]
+
+            # Find which odds band this falls in
+            for band_name, (lo, hi, min_edge) in self.ODDS_BANDS.items():
+                if lo <= odds < hi:
+                    # Check position eligibility for this band
+                    if pos not in self.ELIGIBLE_BY_BAND[band_name]:
+                        break
+                    # Check dynamic edge threshold
+                    if row["edge"] >= min_edge:
+                        bets.append(BetRecommendation(
+                            match_id=int(row["match_id"]),
+                            player_id=int(row["player_id"]),
+                            model_prob=float(row["blended_prob"]),
+                            implied_prob=float(row["betfair_implied_prob"]),
+                            odds=float(odds),
+                            edge=float(row["edge"]),
+                            position_code=str(pos),
+                            metadata={"odds_band": band_name},
+                        ))
+                    break
+
+        return bets

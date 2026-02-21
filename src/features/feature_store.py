@@ -24,10 +24,10 @@ from typing import Optional, List, Dict, Any
 import pandas as pd
 import logging
 
-from src.features.player_features import compute_player_features
+from src.features.player_features import compute_player_features, compute_cross_season_priors
 from src.features.team_features import compute_team_features
 from src.features.matchup_features import compute_matchup_features
-from src.features.game_context_features import compute_game_context_features
+from src.features.game_context_features import compute_game_context_features, compute_schedule_features
 from src.features.edge_features import add_player_edge_features
 from src.features.lineup_features import add_lineup_features_to_player_observations
 from src.odds.betfair import add_betfair_odds_features
@@ -77,6 +77,14 @@ def build_feature_store(
     # 2. Compute player features
     player_df = compute_player_features(conn, season, as_of_round=as_of_round)
     logger.info(f"Player features: {len(player_df)} rows")
+
+    # 2b. Compute cross-season player priors and merge into player_df
+    prior_df = compute_cross_season_priors(conn, season)
+    if not prior_df.empty:
+        player_df = player_df.merge(prior_df, on='player_id', how='left')
+        logger.info(f"Cross-season priors: {prior_df.shape[1]-1} features for {len(prior_df)} players")
+    else:
+        logger.info("No cross-season priors available (no prior season data)")
 
     # 3. Compute team features (own team)
     team_df = compute_team_features(conn, season, as_of_round=as_of_round)
@@ -145,6 +153,12 @@ def build_feature_store(
         how='left',
         suffixes=('', '_context')
     )
+
+    # 7b. Add schedule/fatigue features (per team-match)
+    schedule_df = compute_schedule_features(conn, season, as_of_round=as_of_round)
+    if not schedule_df.empty:
+        df = df.merge(schedule_df, on=['match_id', 'squad_id'], how='left')
+        logger.info(f"Schedule features: {len(schedule_df)} team-match rows")
 
     # 8. Add edge features (augments the DataFrame)
     df = add_player_edge_features(df, season=season, max_round=as_of_round, window=5)

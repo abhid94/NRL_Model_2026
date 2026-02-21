@@ -27,18 +27,32 @@ class TeamFeatureConfig:
         "line_breaks",
         "tackle_breaks",
         "offloads",
+        "try_assists",
+        "line_break_assists",
+        "kick_metres",
+        "kicks_general_play",
     )
     defence_metrics: Sequence[str] = (
         "tries_conceded",
         "score_conceded",
         "tackles",
         "missed_tackles",
+        "missed_tackles_conceded",
     )
     control_metrics: Sequence[str] = (
         "completion_rate_percentage",
         "possession_percentage",
         "errors",
         "penalties_conceded",
+        "handling_errors",
+        "set_restarts",
+        "complete_sets",
+    )
+    territory_metrics: Sequence[str] = (
+        "time_in_opp20",
+        "time_in_own20",
+        "forty_twenty",
+        "goal_line_dropouts",
     )
     include_recent_form: bool = True
     fillna_value: float | None = 0.0
@@ -83,6 +97,17 @@ def fetch_team_match_stats(
                 ts.tackle_breaks,
                 ts.offloads,
                 ts.penalties_conceded,
+                ts.try_assists,
+                ts.line_break_assists,
+                ts.kick_metres,
+                ts.kicks_general_play,
+                ts.handling_errors,
+                ts.set_restarts,
+                ts.complete_sets,
+                ts.time_in_opp20,
+                ts.time_in_own20,
+                ts.forty_twenty,
+                ts.goal_line_dropouts,
                 m.round_number,
                 m.home_squad_id,
                 m.away_squad_id
@@ -108,8 +133,20 @@ def fetch_team_match_stats(
             tm.errors,
             tm.penalties_conceded,
             tm.post_contact_metres,
+            tm.try_assists,
+            tm.line_break_assists,
+            tm.kick_metres,
+            tm.kicks_general_play,
+            tm.handling_errors,
+            tm.set_restarts,
+            tm.complete_sets,
+            tm.time_in_opp20,
+            tm.time_in_own20,
+            tm.forty_twenty,
+            tm.goal_line_dropouts,
             opp.score AS score_conceded,
-            opp.tries AS tries_conceded
+            opp.tries AS tries_conceded,
+            opp.missed_tackles AS missed_tackles_conceded
         FROM team_match tm
         LEFT JOIN team_match opp ON tm.match_id = opp.match_id
             AND tm.squad_id != opp.squad_id
@@ -156,7 +193,10 @@ def compute_team_features(
         raise ValueError("No team stats found for the requested season.")
 
     if as_of_round is not None:
-        stats = stats[stats["round_number"] < as_of_round].copy()
+        # Include the current round so rows exist for output filtering.
+        # shift(1) in _rolling_feature ensures current round's stats don't
+        # leak into rolling features — only prior rounds contribute.
+        stats = stats[stats["round_number"] <= as_of_round].copy()
 
     stats.sort_values(["squad_id", "round_number", "match_id"], inplace=True)
 
@@ -189,6 +229,16 @@ def compute_team_features(
             raise ValueError(f"Control metric '{metric}' not found in team stats.")
         for window in feature_config.windows:
             feature_name = f"rolling_{metric}_{window}"
+            features[feature_name] = grouped[metric].transform(
+                lambda s: _rolling_feature(s, window)
+            )
+
+    # Territory features
+    for metric in feature_config.territory_metrics:
+        if metric not in stats.columns:
+            raise ValueError(f"Territory metric '{metric}' not found in team stats.")
+        for window in feature_config.windows:
+            feature_name = f"rolling_territory_{metric}_{window}"
             features[feature_name] = grouped[metric].transform(
                 lambda s: _rolling_feature(s, window)
             )

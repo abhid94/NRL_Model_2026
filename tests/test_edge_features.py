@@ -108,7 +108,8 @@ class TestTeamEdgeAttackProfiles:
         ]
 
         for col in pct_cols:
-            assert (result[col] >= 0).all(), f"{col} should be >= 0"
+            # First match per team will be NaN due to shift(1), drop NaN before checking
+            assert (result[col].dropna() >= 0).all(), f"{col} should be >= 0 (excluding NaN)"
 
 
 class TestTeamEdgeDefenceProfiles:
@@ -146,7 +147,8 @@ class TestTeamEdgeDefenceProfiles:
         ]
 
         for col in conceded_cols:
-            assert (result[col] >= 0).all(), f"{col} should be >= 0"
+            # First match per team will be NaN due to shift(1), drop NaN before checking
+            assert (result[col].dropna() >= 0).all(), f"{col} should be >= 0 (excluding NaN)"
 
     def test_max_round_filtering(self):
         """max_round parameter should filter to rounds < max_round."""

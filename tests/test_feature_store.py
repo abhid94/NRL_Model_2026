@@ -134,7 +134,7 @@ class TestFeatureStoreBuilding:
             'rolling_tries_5',  # Team features use rolling_{metric}_{window}
 
             # Opponent team features (should be prefixed with opponent_)
-            'opponent_rolling_tries_conceded_5',
+            'opponent_rolling_defence_tries_conceded_5',
 
             # Game context features
             'expected_team_tries_5',
@@ -144,10 +144,10 @@ class TestFeatureStoreBuilding:
             'player_edge',  # Edge classification
 
             # Matchup features
-            'player_vs_opponent_games',
+            'matchup_games_vs_opp',
 
             # Lineup features
-            'playmaker_quality_rolling_5',
+            'teammate_playmakers_try_assists_rolling_5',
 
             # Odds features
             'betfair_closing_odds',
@@ -319,9 +319,11 @@ class TestFeatureMetadata:
         # Core features should be documented
         core_features = [
             'match_id', 'player_id', 'scored_try', 'season',
-            'tries_rolling_5', 'team_tries_rolling_5', 'expected_team_tries',
-            'edge_position', 'playmaker_quality', 'betfair_closing_odds'
+            'rolling_tries_3', 'rolling_try_rate_3', 'expected_team_tries_5',
+            'player_edge', 'playmaker_quality_rolling_5', 'betfair_closing_odds',
         ]
+        # Note: playmaker_quality_rolling_5 is the documented name in metadata
+        # Actual column may differ (teammate_playmakers_try_assists_rolling_5)
 
         for feature in core_features:
             assert feature in documented_features, f"Core feature {feature} not documented"
@@ -384,7 +386,7 @@ class TestLeakagePrevention:
         has_history = df_r10['round_number'] > 5
 
         # Player features should not be NaN for players with 5+ rounds
-        assert df_r10.loc[has_history, 'tries_rolling_5'].notna().any()
+        assert df_r10.loc[has_history, 'rolling_tries_5'].notna().any()
 
     def test_target_not_in_features_when_excluded(self, conn):
         """Target should be excluded when include_target=False."""

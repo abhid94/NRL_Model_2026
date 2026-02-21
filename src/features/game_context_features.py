@@ -412,3 +412,81 @@ def compute_game_context_features(
         as_of_round,
     )
     return features.reset_index(drop=True)
+
+
+def compute_schedule_features(
+    connection: Connection,
+    year: int | str,
+    *,
+    as_of_round: int | None = None,
+) -> pd.DataFrame:
+    """Compute schedule and fatigue features per team-match.
+
+    Features:
+    - ``days_since_last_match`` — short turnaround vs bye-week rest.
+    - ``matches_in_last_14_days`` — workload / congestion proxy.
+
+    These use only public scheduling data (no leakage risk).
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Database connection.
+    year : int | str
+        Season year.
+    as_of_round : int | None
+        If given, return only rows for this round.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: match_id, squad_id, days_since_last_match,
+        matches_in_last_14_days.
+    """
+    normalized_year = db.normalize_year(year)
+    matches = db.get_table("matches", normalized_year)
+    team_stats = db.get_table("team_stats", normalized_year)
+
+    query = f"""
+        SELECT ts.match_id, ts.squad_id, m.round_number, m.utc_start_time
+        FROM {team_stats} ts
+        JOIN {matches} m ON ts.match_id = m.match_id
+        ORDER BY ts.squad_id, m.utc_start_time
+    """
+    df = db.fetch_df(connection, query)
+    if df.empty:
+        return pd.DataFrame(columns=["match_id", "squad_id", "days_since_last_match", "matches_in_last_14_days"])
+
+    df["utc_start_time"] = pd.to_datetime(df["utc_start_time"], utc=True)
+    df.sort_values(["squad_id", "utc_start_time"], inplace=True)
+
+    # Days since last match (per team)
+    df["prev_match_time"] = df.groupby("squad_id")["utc_start_time"].shift(1)
+    df["days_since_last_match"] = (
+        (df["utc_start_time"] - df["prev_match_time"]).dt.total_seconds() / 86400
+    )
+
+    # Matches in last 14 days (per team, excluding current match)
+    def _matches_in_window(group: pd.DataFrame) -> pd.Series:
+        counts = []
+        times = group["utc_start_time"].values
+        for i, t in enumerate(times):
+            window_start = t - np.timedelta64(14, "D")
+            # Count prior matches within the window (exclude current)
+            count = int(((times[:i] >= window_start) & (times[:i] < t)).sum())
+            counts.append(count)
+        return pd.Series(counts, index=group.index)
+
+    df["matches_in_last_14_days"] = df.groupby("squad_id", group_keys=False).apply(
+        _matches_in_window, include_groups=False
+    )
+
+    result = df[["match_id", "squad_id", "round_number", "days_since_last_match", "matches_in_last_14_days"]].copy()
+
+    if as_of_round is not None:
+        result = result[result["round_number"] == as_of_round]
+
+    result = result.drop(columns=["round_number"])
+
+    LOGGER.info("Computed schedule features for %d team-match rows (season=%s)", len(result), year)
+    return result.reset_index(drop=True)
