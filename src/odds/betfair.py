@@ -165,7 +165,9 @@ def extract_betfair_odds(
         best_back_price_60_min_prior,
         best_lay_price_1_min_prior,
         total_matched_volume,
-        matched_volume_1_min_prior
+        matched_volume_1_min_prior,
+        matched_volume_30_min_prior,
+        matched_volume_60_min_prior
     FROM betfair_markets_{year}
     WHERE market_type = 'TO_SCORE'
         AND AD_match_id = ?
@@ -230,6 +232,45 @@ def extract_betfair_odds(
     except (ValueError, TypeError):
         pass
 
+    # Odds drift from 30min to 1min prior (late momentum signal)
+    # > 1.0 = price drifting (getting longer), < 1.0 = price shortening (steaming in)
+    odds_drift_30_to_1min = np.nan
+    try:
+        price_30 = row.get('best_back_price_30_min_prior')
+        price_1 = row.get('best_back_price_1_min_prior')
+        if (pd.notna(price_30) and price_30 != '' and
+                pd.notna(price_1) and price_1 != ''):
+            price_30 = float(price_30)
+            price_1 = float(price_1)
+            if price_30 > 0 and price_1 > 0:
+                odds_drift_30_to_1min = price_30 / price_1
+    except (ValueError, TypeError):
+        pass
+
+    # Volume acceleration: ratio of late volume to early volume
+    # High values = volume concentrated late (sharp money signal)
+    volume_acceleration = np.nan
+    try:
+        vol_1 = row.get('matched_volume_1_min_prior')
+        vol_60 = row.get('matched_volume_60_min_prior')
+        if (pd.notna(vol_1) and vol_1 != '' and
+                pd.notna(vol_60) and vol_60 != ''):
+            vol_1 = float(vol_1)
+            vol_60 = float(vol_60)
+            early_vol = vol_60 - vol_1
+            if early_vol > 0:
+                volume_acceleration = vol_1 / early_vol
+    except (ValueError, TypeError):
+        pass
+
+    # Late volume share: fraction of total volume matched in last minute
+    late_volume_share = np.nan
+    try:
+        if pd.notna(late_volume) and pd.notna(matched_volume) and matched_volume > 0:
+            late_volume_share = late_volume / matched_volume
+    except (ValueError, TypeError):
+        pass
+
     return pd.Series({
         'betfair_closing_odds': closing_odds,
         'betfair_implied_prob': implied_prob,
@@ -238,6 +279,9 @@ def extract_betfair_odds(
         'betfair_spread': spread,
         'betfair_price_movement': price_movement,
         'betfair_late_volume': late_volume,
+        'betfair_odds_drift_30_to_1min': odds_drift_30_to_1min,
+        'betfair_volume_acceleration': volume_acceleration,
+        'betfair_late_volume_share': late_volume_share,
     })
 
 
@@ -312,6 +356,9 @@ def add_betfair_odds_features(
         'betfair_spread',
         'betfair_price_movement',
         'betfair_late_volume',
+        'betfair_odds_drift_30_to_1min',
+        'betfair_volume_acceleration',
+        'betfair_late_volume_share',
     ]
     for col in odds_cols:
         df[col] = np.nan

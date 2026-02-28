@@ -8,8 +8,8 @@
 
 ## Current Status
 
-**Active Phase**: Phase 5B — Data-Driven Edge Discovery & Model Enhancement
-**Last Updated**: 2026-02-21 (Phase 5B Sprint 1-3 complete: +20% ROI profitable in BOTH seasons)
+**Active Phase**: Phase 5 — 2026 Season Data Ingestion
+**Last Updated**: 2026-02-25 (matches_2026 populated from Champion Data fixture — 204 matches, 27 rounds)
 
 ---
 
@@ -326,6 +326,24 @@
 - Both seasons profitable: 2024 +20.6%, 2025 +18.8% — STABLE edge
 - Market blending (alpha=0.25) anchors to market, reducing overfitting
 - Higher regularization (reg=3, max_depth=4, min_child_samples=80) prevents noise memorization
+
+## Phase 5C: 2026 Season Live Ingestion
+
+### 2026 Fixture Ingestion ✅ COMPLETE (2026-02-25)
+- [x] `src/ingestion/ingest_champion_data.py` — Champion Data fixture ingestion module
+  - [x] `fetch_fixture(url)` — HTTP GET + JSON parse via stdlib urllib
+  - [x] `_parse_match(raw)` — camelCase → snake_case DB column mapping
+  - [x] `create_matches_table(conn, year)` — DDL matching matches_2024 schema exactly
+  - [x] `upsert_teams_from_fixture(conn, raw_matches)` — defensive team upsert (INSERT OR IGNORE + UPDATE)
+  - [x] `upsert_matches(conn, matches, year)` — idempotent INSERT OR REPLACE
+  - [x] `ingest_fixture(url, year)` — main entry point, manages own connection
+- [x] `scripts/ingest_2026_fixture.py` — CLI runner with verification queries
+- [x] **matches_2026 populated**: 204 matches, 27 rounds, 17 teams, no orphan squad_ids
+
+### 2026 Live Data Pipeline (pending — starts Round 1)
+- [ ] Ingest Round 1 team lists: `ingest_round_team_lists(round_number=1, year=2026)`
+- [ ] Generate Round 1 predictions: `python scripts/run_weekly_pipeline.py --season 2026 --round 1`
+- [ ] Monitor outcomes and log actuals
 
 ## Phase 6: Extensibility (only after ATS is proven profitable)
 

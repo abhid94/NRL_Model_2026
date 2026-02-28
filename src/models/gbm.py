@@ -213,7 +213,16 @@ class GBMModel(BaseModel):
         pd.DataFrame
             Ready for LightGBM.
         """
-        df = X[self._features].copy()
+        # Handle missing features gracefully (e.g., new season with fewer features)
+        missing = [f for f in self._features if f not in X.columns]
+        if missing:
+            LOGGER.warning(
+                "%d/%d features missing from input — filling with NaN: %s",
+                len(missing), len(self._features), missing[:10],
+            )
+            df = X.reindex(columns=self._features).copy()
+        else:
+            df = X[self._features].copy()
         for col in self._cat_features:
             if col in df.columns:
                 df[col] = df[col].astype("category")

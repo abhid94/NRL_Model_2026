@@ -56,18 +56,34 @@ class BetCard:
             "",
         ]
         if self.bets:
-            lines.append(
-                f"{'Player':>8} {'Pos':>4} {'Odds':>6} {'Edge':>6} "
-                f"{'Model%':>7} {'Mkt%':>6} {'Stake':>8}"
-            )
-            lines.append("-" * 55)
-            for b in self.bets:
+            has_bookmaker = any("bookmaker" in b for b in self.bets)
+            if has_bookmaker:
                 lines.append(
-                    f"{b['player_id']:>8} {b['position_code']:>4} "
-                    f"{b['odds']:>6.2f} {b['edge']*100:>5.1f}% "
-                    f"{b['model_prob']*100:>6.1f}% {b['implied_prob']*100:>5.1f}% "
-                    f"${b['stake']:>7.0f}"
+                    f"{'Player':>8} {'Pos':>4} {'Bookmaker':>12} {'Odds':>6} "
+                    f"{'Edge':>6} {'Model%':>7} {'Mkt%':>6} {'Stake':>8}"
                 )
+                lines.append("-" * 70)
+                for b in self.bets:
+                    bk = b.get("bookmaker", "")[:12]
+                    lines.append(
+                        f"{b['player_id']:>8} {b['position_code']:>4} "
+                        f"{bk:>12} {b['odds']:>6.2f} {b['edge']*100:>5.1f}% "
+                        f"{b['model_prob']*100:>6.1f}% {b['implied_prob']*100:>5.1f}% "
+                        f"${b['stake']:>7.0f}"
+                    )
+            else:
+                lines.append(
+                    f"{'Player':>8} {'Pos':>4} {'Odds':>6} {'Edge':>6} "
+                    f"{'Model%':>7} {'Mkt%':>6} {'Stake':>8}"
+                )
+                lines.append("-" * 55)
+                for b in self.bets:
+                    lines.append(
+                        f"{b['player_id']:>8} {b['position_code']:>4} "
+                        f"{b['odds']:>6.2f} {b['edge']*100:>5.1f}% "
+                        f"{b['model_prob']*100:>6.1f}% {b['implied_prob']*100:>5.1f}% "
+                        f"${b['stake']:>7.0f}"
+                    )
         else:
             lines.append("  No bets recommended.")
         return "\n".join(lines)
@@ -142,10 +158,17 @@ def generate_bet_card(
     max_bet = max_stake_pct * bankroll
     max_round = max_round_exposure_pct * bankroll
 
+    # Determine which odds to display (actual bookmaker price when available)
+    has_best_odds = "best_odds" in df.columns and df["best_odds"].notna().any()
+    if has_best_odds:
+        df["_display_odds"] = df["best_odds"].fillna(df["betfair_closing_odds"])
+    else:
+        df["_display_odds"] = df["betfair_closing_odds"]
+
     if flat_stake is not None:
         df["stake"] = flat_stake
     else:
-        # Kelly staking
+        # Kelly staking (fallback if flat_stake not provided)
         df["stake"] = df.apply(
             lambda row: _kelly_stake(
                 row["edge"], row["betfair_closing_odds"],
@@ -185,16 +208,20 @@ def generate_bet_card(
     # Build bet records
     bets = []
     for _, row in df.iterrows():
-        bets.append({
+        bet: dict[str, Any] = {
             "match_id": int(row["match_id"]),
             "player_id": int(row["player_id"]),
             "position_code": str(row.get("position_code", "")),
             "model_prob": round(float(row["model_prob"]), 4),
-            "implied_prob": round(float(row["betfair_implied_prob"]), 4),
-            "odds": round(float(row["betfair_closing_odds"]), 2),
+            "implied_prob": round(float(row.get("best_implied_prob", row["betfair_implied_prob"])), 4),
+            "odds": round(float(row["_display_odds"]), 2),
             "edge": round(float(row["edge"]), 4),
             "stake": round(float(row["stake"]), 0),
-        })
+        }
+        # Add bookmaker info when available
+        if "best_bookmaker" in row.index and pd.notna(row.get("best_bookmaker")):
+            bet["bookmaker"] = str(row["best_bookmaker"])
+        bets.append(bet)
 
     total_staked = sum(b["stake"] for b in bets)
     exposure_pct = (total_staked / bankroll * 100) if bankroll > 0 else 0.0

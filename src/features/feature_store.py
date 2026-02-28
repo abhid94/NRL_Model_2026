@@ -21,6 +21,7 @@ LEAKAGE PREVENTION:
 import sqlite3
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+import numpy as np
 import pandas as pd
 import logging
 
@@ -30,7 +31,10 @@ from src.features.matchup_features import compute_matchup_features
 from src.features.game_context_features import compute_game_context_features, compute_schedule_features
 from src.features.edge_features import add_player_edge_features
 from src.features.lineup_features import add_lineup_features_to_player_observations
+from src.features.discipline_features import compute_discipline_features
 from src.odds.betfair import add_betfair_odds_features
+from src.config import BOOKMAKER_MARGIN_CORRECTION
+from src.db import table_exists
 
 logger = logging.getLogger(__name__)
 
@@ -74,110 +78,197 @@ def build_feature_store(
     base_df = _get_base_observations(conn, season, as_of_round)
     logger.info(f"Base observations: {len(base_df)} player-match records")
 
-    # 2. Compute player features
-    player_df = compute_player_features(conn, season, as_of_round=as_of_round)
-    logger.info(f"Player features: {len(player_df)} rows")
+    # 2. Compute player features (may fail if player_stats table doesn't exist)
+    player_df = None
+    try:
+        player_df = compute_player_features(conn, season, as_of_round=as_of_round)
+        logger.info(f"Player features: {len(player_df)} rows")
+    except Exception:
+        logger.warning(f"Player features unavailable for {season} (no player_stats table?) — skipping")
 
-    # 2b. Compute cross-season player priors and merge into player_df
-    prior_df = compute_cross_season_priors(conn, season)
-    if not prior_df.empty:
-        player_df = player_df.merge(prior_df, on='player_id', how='left')
-        logger.info(f"Cross-season priors: {prior_df.shape[1]-1} features for {len(prior_df)} players")
-    else:
-        logger.info("No cross-season priors available (no prior season data)")
+    # 2b. Compute cross-season player priors (queries prior season, should work)
+    prior_df = pd.DataFrame()
+    try:
+        prior_df = compute_cross_season_priors(conn, season)
+        if not prior_df.empty:
+            if player_df is not None:
+                player_df = player_df.merge(prior_df, on='player_id', how='left')
+            logger.info(f"Cross-season priors: {prior_df.shape[1]-1} features for {len(prior_df)} players")
+        else:
+            logger.info("No cross-season priors available (no prior season data)")
+    except Exception:
+        logger.warning(f"Cross-season priors unavailable for {season} — skipping")
 
     # 3. Compute team features (own team)
-    team_df = compute_team_features(conn, season, as_of_round=as_of_round)
-    logger.info(f"Team features: {len(team_df)} rows")
+    team_df = None
+    try:
+        team_df = compute_team_features(conn, season, as_of_round=as_of_round)
+        logger.info(f"Team features: {len(team_df)} rows")
+    except Exception:
+        logger.warning(f"Team features unavailable for {season} — skipping")
 
     # 4. Create opponent team features (rename columns for clarity)
-    opponent_team_df = team_df.copy()
-    opponent_team_df.columns = [
-        col if col == 'match_id'
-        else 'opponent_squad_id' if col == 'squad_id'
-        else f'opponent_{col}'
-        for col in opponent_team_df.columns
-    ]
-    logger.info(f"Opponent team features: {len(opponent_team_df)} rows")
+    opponent_team_df = None
+    if team_df is not None:
+        opponent_team_df = team_df.copy()
+        opponent_team_df.columns = [
+            col if col == 'match_id'
+            else 'opponent_squad_id' if col == 'squad_id'
+            else f'opponent_{col}'
+            for col in opponent_team_df.columns
+        ]
+        logger.info(f"Opponent team features: {len(opponent_team_df)} rows")
 
     # 5. Compute matchup features
-    matchup_df = compute_matchup_features(conn, season, as_of_round=as_of_round)
-    logger.info(f"Matchup features: {len(matchup_df)} rows")
+    matchup_df = None
+    try:
+        matchup_df = compute_matchup_features(conn, season, as_of_round=as_of_round)
+        logger.info(f"Matchup features: {len(matchup_df)} rows")
+    except Exception:
+        logger.warning(f"Matchup features unavailable for {season} — skipping")
 
     # 6. Compute game context features
-    game_context_df = compute_game_context_features(conn, season, as_of_round=as_of_round)
-    logger.info(f"Game context features: {len(game_context_df)} rows")
+    game_context_df = None
+    try:
+        game_context_df = compute_game_context_features(conn, season, as_of_round=as_of_round)
+        logger.info(f"Game context features: {len(game_context_df)} rows")
+    except Exception:
+        logger.warning(f"Game context features unavailable for {season} — skipping")
 
     # 7. Join the core features on (match_id, player_id) or (match_id, squad_id)
-    # Strategy: Keep only essential columns from base_df, let feature DataFrames provide the rest
-    # Need opponent_squad_id for opponent team features merge
-    df = base_df[['match_id', 'player_id', 'opponent_squad_id', 'tries']].copy()
+    # Start with base columns — include squad_id from base_df (needed for team merges)
+    base_cols = ['match_id', 'player_id', 'squad_id', 'opponent_squad_id', 'tries']
+    # Also include round_number, is_home, jersey_number if available from base
+    for extra in ['round_number', 'is_home', 'jersey_number']:
+        if extra in base_df.columns:
+            base_cols.append(extra)
+    df = base_df[base_cols].copy()
 
-    # Join player features (provides squad_id, opponent_squad_id, round_number, is_home, position, etc.)
-    df = df.merge(
-        player_df,
-        on=['match_id', 'player_id'],
-        how='left'
-    )
+    # Join player features (provides rolling stats, position, etc.)
+    if player_df is not None:
+        df = df.merge(
+            player_df,
+            on=['match_id', 'player_id'],
+            how='left',
+            suffixes=('', '_player')
+        )
+
+    # Merge cross-season priors directly if player_df was unavailable
+    if player_df is None and not prior_df.empty:
+        df = df.merge(prior_df, on='player_id', how='left')
+
+    # Derive position features from jersey_number if player features unavailable
+    if player_df is None and 'jersey_number' in df.columns and 'position_code' not in df.columns:
+        from src.config import position_from_jersey
+        from src.features.player_features import _position_group_from_code
+        pos_info = df['jersey_number'].apply(
+            lambda j: position_from_jersey(int(j) if pd.notna(j) else None)
+        )
+        df['position_code'] = pos_info.apply(lambda p: p.code)
+        df['position_label'] = pos_info.apply(lambda p: p.label)
+        df['position_group'] = df['position_code'].apply(_position_group_from_code)
+        df['is_starter'] = (df['jersey_number'].fillna(99) <= 13).astype(int)
+        df['jumper_number'] = df['jersey_number']
+        logger.info("Derived position features from jersey_number")
 
     # Join own team features (join on match_id + squad_id)
-    # Extract squad_id from player features for joining
-    df = df.merge(
-        team_df,
-        on=['match_id', 'squad_id'],
-        how='left',
-        suffixes=('', '_team_own')
-    )
+    if team_df is not None:
+        df = df.merge(
+            team_df,
+            on=['match_id', 'squad_id'],
+            how='left',
+            suffixes=('', '_team_own')
+        )
 
     # Join opponent team features (join on match_id + opponent_squad_id)
-    # opponent_squad_id comes from player features
-    df = df.merge(
-        opponent_team_df,
-        on=['match_id', 'opponent_squad_id'],
-        how='left',
-        suffixes=('', '_team_opp')
-    )
+    if opponent_team_df is not None:
+        df = df.merge(
+            opponent_team_df,
+            on=['match_id', 'opponent_squad_id'],
+            how='left',
+            suffixes=('', '_team_opp')
+        )
 
     # Join matchup features
-    df = df.merge(
-        matchup_df,
-        on=['match_id', 'player_id'],
-        how='left',
-        suffixes=('', '_matchup')
-    )
+    if matchup_df is not None:
+        df = df.merge(
+            matchup_df,
+            on=['match_id', 'player_id'],
+            how='left',
+            suffixes=('', '_matchup')
+        )
 
     # Join game context features
-    df = df.merge(
-        game_context_df,
-        on=['match_id', 'player_id'],
-        how='left',
-        suffixes=('', '_context')
-    )
+    if game_context_df is not None:
+        df = df.merge(
+            game_context_df,
+            on=['match_id', 'player_id'],
+            how='left',
+            suffixes=('', '_context')
+        )
 
     # 7b. Add schedule/fatigue features (per team-match)
-    schedule_df = compute_schedule_features(conn, season, as_of_round=as_of_round)
-    if not schedule_df.empty:
-        df = df.merge(schedule_df, on=['match_id', 'squad_id'], how='left')
-        logger.info(f"Schedule features: {len(schedule_df)} team-match rows")
+    try:
+        schedule_df = compute_schedule_features(conn, season, as_of_round=as_of_round)
+        if not schedule_df.empty:
+            df = df.merge(schedule_df, on=['match_id', 'squad_id'], how='left')
+            logger.info(f"Schedule features: {len(schedule_df)} team-match rows")
+    except Exception:
+        logger.warning(f"Schedule features unavailable for {season} — skipping")
 
     # 8. Add edge features (augments the DataFrame)
-    df = add_player_edge_features(df, season=season, max_round=as_of_round, window=5)
-    logger.info(f"After edge features: {len(df)} rows")
+    try:
+        df = add_player_edge_features(df, season=season, max_round=as_of_round, window=5)
+        logger.info(f"After edge features: {len(df)} rows")
+    except Exception:
+        logger.warning(f"Edge features unavailable for {season} — skipping")
+
+    # 8b. Add discipline features (sin bins, on-reports)
+    try:
+        discipline_df = compute_discipline_features(conn, season, as_of_round=as_of_round, window=5)
+        if not discipline_df.empty:
+            df = df.merge(discipline_df, on=['match_id', 'player_id'], how='left')
+            logger.info(f"After discipline features: {len(df)} rows")
+    except Exception:
+        logger.warning(f"Discipline features unavailable for {season} — skipping")
 
     # 9. Add lineup features (augments the DataFrame)
-    df = add_lineup_features_to_player_observations(df, conn, season, as_of_round=as_of_round, window=5)
-    logger.info(f"After lineup features: {len(df)} rows")
+    try:
+        df = add_lineup_features_to_player_observations(df, conn, season, as_of_round=as_of_round, window=5)
+        logger.info(f"After lineup features: {len(df)} rows")
+    except Exception:
+        logger.warning(f"Lineup features unavailable for {season} — skipping")
 
     # 10. Add Betfair odds features (augments the DataFrame)
-    df = add_betfair_odds_features(df, conn, season)
-    logger.info(f"After odds features: {len(df)} rows")
+    try:
+        df = add_betfair_odds_features(df, conn, season)
+        logger.info(f"After odds features: {len(df)} rows")
+    except Exception:
+        logger.warning(f"Betfair odds features unavailable for {season} — skipping")
+
+    # 10b. For 2026+, fill betfair_implied_prob from bookmaker odds (if available)
+    # The model was trained on Betfair-scale probabilities. Bookmaker odds have
+    # higher overround, so we apply BOOKMAKER_MARGIN_CORRECTION to approximate
+    # the Betfair scale.
+    if season >= 2026:
+        # Ensure odds columns exist (may be missing if betfair step was skipped)
+        if 'betfair_implied_prob' not in df.columns:
+            df['betfair_implied_prob'] = np.nan
+        if 'betfair_closing_odds' not in df.columns:
+            df['betfair_closing_odds'] = np.nan
+        df = _fill_odds_from_bookmaker(df, conn, season)
 
     # Add season column
     df['season'] = season
 
     # Add target variable if requested
     if include_target:
-        df['scored_try'] = (df['tries'] >= 1).astype(int)
+        if df['tries'].isna().all():
+            logger.warning("No tries data available — cannot create target variable. "
+                           "Use include_target=False for prediction mode.")
+            include_target = False
+        else:
+            df['scored_try'] = (df['tries'] >= 1).astype(int)
 
     logger.info(f"Final feature store: {len(df)} rows × {len(df.columns)} columns")
 
@@ -211,25 +302,144 @@ def _get_base_observations(
         Columns: match_id, player_id, squad_id, opponent_squad_id,
                  round_number, is_home, tries (for target)
     """
-    round_filter = f"AND m.round_number = {as_of_round}" if as_of_round else ""
+    player_stats_table = f"player_stats_{season}"
+
+    if table_exists(conn, player_stats_table):
+        round_filter = f"AND m.round_number = {as_of_round}" if as_of_round else ""
+
+        query = f"""
+        SELECT
+            ps.match_id,
+            ps.player_id,
+            ps.squad_id,
+            ps.opponent_squad_id,
+            m.round_number,
+            CASE WHEN ps.side = 'home' THEN 1 ELSE 0 END as is_home,
+            ps.tries
+        FROM {player_stats_table} ps
+        JOIN matches_{season} m ON ps.match_id = m.match_id
+        WHERE m.match_type = 'H'  -- H = Home and Away season (regular season)
+        {round_filter}
+        ORDER BY m.round_number, ps.match_id, ps.player_id
+        """
+
+        df = pd.read_sql_query(query, conn)
+        return df
+
+    # Fallback: build base observations from team_lists + matches
+    # Used for new seasons where player_stats doesn't exist yet (e.g., 2026 Round 1)
+    logger.info(
+        f"No {player_stats_table} table — building base observations from "
+        f"team_lists_{season} + matches_{season}"
+    )
+
+    round_filter = f"AND tl.round_number = {as_of_round}" if as_of_round else ""
 
     query = f"""
     SELECT
-        ps.match_id,
-        ps.player_id,
-        ps.squad_id,
-        ps.opponent_squad_id,
-        m.round_number,
-        CASE WHEN ps.side = 'home' THEN 1 ELSE 0 END as is_home,
-        ps.tries
-    FROM player_stats_{season} ps
-    JOIN matches_{season} m ON ps.match_id = m.match_id
-    WHERE m.match_type = 'H'  -- H = Home and Away season (regular season)
+        tl.match_id,
+        tl.player_id,
+        tl.squad_id,
+        CASE
+            WHEN tl.squad_id = m.home_squad_id THEN m.away_squad_id
+            ELSE m.home_squad_id
+        END AS opponent_squad_id,
+        tl.round_number,
+        CASE WHEN tl.squad_id = m.home_squad_id THEN 1 ELSE 0 END AS is_home,
+        tl.jersey_number
+    FROM team_lists_{season} tl
+    JOIN matches_{season} m ON tl.match_id = m.match_id
+    WHERE m.match_type = 'H'
+    AND tl.player_id IS NOT NULL
     {round_filter}
-    ORDER BY m.round_number, ps.match_id, ps.player_id
+    ORDER BY tl.round_number, tl.match_id, tl.player_id
     """
 
     df = pd.read_sql_query(query, conn)
+    # No tries data available — set to NaN (target unknown for prediction)
+    df['tries'] = np.nan
+    return df
+
+
+def _fill_odds_from_bookmaker(
+    df: pd.DataFrame,
+    conn: sqlite3.Connection,
+    season: int,
+) -> pd.DataFrame:
+    """Fill missing betfair_implied_prob from bookmaker_odds table.
+
+    For 2026+ seasons, Betfair odds may not be available in the
+    betfair_markets table. Instead, we use the best available
+    bookmaker price (adjusted by BOOKMAKER_MARGIN_CORRECTION) to
+    populate betfair_implied_prob and betfair_closing_odds so the
+    model's #1 feature is available.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Feature store with betfair_implied_prob column (may be NaN).
+    conn : sqlite3.Connection
+        Database connection.
+    season : int
+        Season year (>= 2026).
+
+    Returns
+    -------
+    pd.DataFrame
+        Updated DataFrame with filled odds columns.
+    """
+    table = f"bookmaker_odds_{season}"
+    try:
+        conn.execute(f"SELECT 1 FROM {table} LIMIT 1")
+    except Exception:  # noqa: BLE001
+        logger.info("No %s table found — skipping bookmaker odds fill", table)
+        return df
+
+    # Query best (highest) decimal_odds per (match_id, player_id)
+    bk_df = pd.read_sql_query(
+        f"""
+        SELECT match_id, player_id,
+               MAX(decimal_odds) AS bk_best_odds,
+               MIN(implied_probability) AS bk_best_implied_prob
+        FROM {table}
+        WHERE is_available = 1
+        GROUP BY match_id, player_id
+        """,
+        conn,
+    )
+
+    if bk_df.empty:
+        logger.info("No bookmaker odds in %s — nothing to fill", table)
+        return df
+
+    # Apply margin correction to bring bookmaker prob to Betfair scale
+    bk_df["bk_adjusted_prob"] = bk_df["bk_best_implied_prob"] * BOOKMAKER_MARGIN_CORRECTION
+    bk_df["bk_adjusted_odds"] = 1.0 / bk_df["bk_adjusted_prob"]
+
+    # Merge and fill NaN values
+    df = df.merge(
+        bk_df[["match_id", "player_id", "bk_adjusted_prob", "bk_adjusted_odds"]],
+        on=["match_id", "player_id"],
+        how="left",
+    )
+
+    mask = df["betfair_implied_prob"].isna() & df["bk_adjusted_prob"].notna()
+    n_filled = mask.sum()
+
+    if n_filled > 0:
+        df.loc[mask, "betfair_implied_prob"] = df.loc[mask, "bk_adjusted_prob"]
+        df.loc[mask, "betfair_closing_odds"] = df.loc[mask, "bk_adjusted_odds"]
+        logger.info(
+            "Filled %d/%d missing betfair_implied_prob from bookmaker odds "
+            "(margin correction=%.2f)",
+            n_filled, len(df), BOOKMAKER_MARGIN_CORRECTION,
+        )
+    else:
+        logger.info("No missing betfair_implied_prob to fill from bookmaker odds")
+
+    # Clean up temp columns
+    df = df.drop(columns=["bk_adjusted_prob", "bk_adjusted_odds"], errors="ignore")
+
     return df
 
 

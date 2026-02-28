@@ -114,12 +114,56 @@ def run_weekly_pipeline(
         if season not in training_seasons:
             training_seasons.append(season)
 
+    # Step 0: Ingest team lists (idempotent — safe to re-run)
+    LOGGER.info("Step 0: Ingesting team lists for %d Round %d", season, round_number)
+    try:
+        from src.ingestion.ingest_team_lists import ingest_round_team_lists
+        tl_summary = ingest_round_team_lists(round_number=round_number, year=season)
+        LOGGER.info(
+            "Team lists: %d/%d players matched (%d unmatched)",
+            tl_summary["n_matched"],
+            tl_summary["n_scraped"],
+            tl_summary["n_unmatched"],
+        )
+        if tl_summary["unmatched_players"]:
+            LOGGER.warning("Unmatched players: %s", tl_summary["unmatched_players"])
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Team list ingestion failed (non-fatal): %s", exc)
+        tl_summary = {}
+
+    # Step 0.5: Ingest bookmaker odds from The Odds API (non-fatal)
+    LOGGER.info("Step 0.5: Ingesting bookmaker odds for %d Round %d", season, round_number)
+    odds_summary: dict = {}
+    try:
+        from src.odds.bookmaker import ingest_round_odds as _ingest_odds
+        odds_summary = _ingest_odds(
+            round_number=round_number, season=season, snapshot_type="closing",
+        )
+        LOGGER.info(
+            "Bookmaker odds: %d raw, %d matched, %d upserted (%s)",
+            odds_summary.get("n_raw", 0),
+            odds_summary.get("n_matched", 0),
+            odds_summary.get("n_upserted", 0),
+            odds_summary.get("bookmakers", []),
+        )
+        if odds_summary.get("unmatched_players"):
+            LOGGER.warning(
+                "Unmatched odds players: %s", odds_summary["unmatched_players"][:10]
+            )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Odds API ingestion failed (non-fatal): %s", exc)
+
     # Step 1: Build/load feature stores
     LOGGER.info("Step 1: Loading feature stores")
     conn = get_connection(DB_PATH)
 
     training_dfs = []
     for train_season in training_seasons:
+        # Skip current season from training when no prior rounds exist
+        if train_season == season and round_number <= 1:
+            LOGGER.info("  Skipping %d (no prior rounds for training)", train_season)
+            continue
+
         if rebuild_features:
             LOGGER.info("  Rebuilding features for %d", train_season)
             max_round = round_number - 1 if train_season == season else None
@@ -160,7 +204,7 @@ def run_weekly_pipeline(
     if "season" not in round_store.columns:
         round_store["season"] = season
 
-    predictions = predict_round(model, round_store, season, round_number)
+    predictions = predict_round(model, round_store, season, round_number, conn=conn)
     LOGGER.info("  Predictions: %d players", len(predictions))
 
     conn.close()

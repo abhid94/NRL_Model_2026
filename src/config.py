@@ -81,6 +81,64 @@ ELIGIBLE_POSITION_CODES: frozenset[str] = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# Team name aliases for scraping (maps scraped short names → canonical squad_name)
+# Used by src/ingestion/ingest_team_lists._build_team_lookup()
+# ---------------------------------------------------------------------------
+TEAM_NICKNAME_OVERRIDES: dict[str, str] = {
+    # LeagueUnlimited commonly uses these short forms
+    "Knights": "Newcastle Knights",
+    "Cowboys": "North Queensland Cowboys",
+    "Bulldogs": "Canterbury-Bankstown Bulldogs",
+    "Dragons": "St George-Illawarra Dragons",
+    "Roosters": "Sydney Roosters",
+    "Broncos": "Brisbane Broncos",
+    "Raiders": "Canberra Raiders",
+    "Storm": "Melbourne Storm",
+    "Eels": "Parramatta Eels",
+    "Panthers": "Penrith Panthers",
+    "Sharks": "Cronulla-Sutherland Sharks",
+    "Wests Tigers": "Wests Tigers",
+    "Tigers": "Wests Tigers",
+    "Rabbitohs": "South Sydney Rabbitohs",
+    "Sea Eagles": "Manly-Warringah Sea Eagles",
+    "Titans": "Gold Coast Titans",
+    "Warriors": "Warriors",
+    "Dolphins": "Dolphins",
+    # The Odds API uses slightly different names (no hyphens)
+    "Canterbury Bulldogs": "Canterbury-Bankstown Bulldogs",
+    "St George Illawarra Dragons": "St George-Illawarra Dragons",
+    "New Zealand Warriors": "Warriors",
+    "Cronulla Sutherland Sharks": "Cronulla-Sutherland Sharks",
+    "Manly Warringah Sea Eagles": "Manly-Warringah Sea Eagles",
+}
+
+
+# ---------------------------------------------------------------------------
+# Odds API Configuration (The Odds API — https://the-odds-api.com)
+# ---------------------------------------------------------------------------
+ODDS_API_SPORT_KEY: str = "rugbyleague_nrl"
+ODDS_API_MARKET: str = "player_try_scorer_anytime"
+ODDS_API_REGIONS: str = "au"
+ODDS_API_BOOKMAKERS: tuple[str, ...] = (
+    "sportsbet", "tab", "ladbrokes_au", "pointsbetau", "betr_au",
+    "tabtouch", "unibet", "betright",
+)
+BOOKMAKER_DISPLAY_NAMES: dict[str, str] = {
+    "sportsbet": "Sportsbet",
+    "tab": "TAB",
+    "ladbrokes_au": "Ladbrokes",
+    "pointsbetau": "Pointsbet",
+    "betr_au": "Betr",
+    "tabtouch": "TABtouch",
+    "unibet": "Unibet",
+    "betright": "BetRight",
+}
+# Margin correction: bookmaker implied probs are ~12-18% inflated vs Betfair's 4-8%
+# Multiply bookmaker implied_prob by this factor to approximate Betfair scale.
+BOOKMAKER_MARGIN_CORRECTION: float = 0.88
+
+
 def position_from_jersey(jersey_number: int | None) -> PositionInfo:
     """Infer position metadata from a jersey number.
 

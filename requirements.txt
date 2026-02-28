@@ -2,6 +2,10 @@
 pandas>=2.1.0
 numpy>=1.24.0
 
+# Web scraping (team list ingestion)
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
 # Machine learning
 scikit-learn>=1.3.0
 xgboost>=2.0.0

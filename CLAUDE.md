@@ -206,20 +206,6 @@
 | score_points | INTEGER | Points for this score event |
 | period_seconds | INTEGER | Time in half |
 
-#### `fixtures_2025`
-| Column | Type | Notes |
-|--------|------|-------|
-| match_id | INTEGER PK | |
-| round | INTEGER | |
-| match_name | TEXT | e.g., "Storm v Roosters" |
-| local_start_time | TEXT | |
-| venue | TEXT | |
-| home_team_id | INTEGER | |
-| home_team_name | TEXT | |
-| away_team_id | INTEGER | |
-| away_team_name | TEXT | |
-| match_status | TEXT | |
-
 #### `team_lists_2025`
 | Column | Type | Notes |
 |--------|------|-------|
