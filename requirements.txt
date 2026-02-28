@@ -24,3 +24,6 @@ pytest>=7.4.0
 
 # Data storage
 pyarrow>=14.0.0
+
+# Dashboard
+streamlit>=1.30.0
