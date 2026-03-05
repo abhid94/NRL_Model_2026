@@ -121,6 +121,11 @@ def compute_teammate_playmaking_features(
 
     df = pd.read_sql_query(query, conn)
 
+    # Ensure numeric dtypes even when query returns zero rows (e.g., Round 1)
+    numeric_cols = [c for c in df.columns if c not in ('match_id', 'squad_id', 'round_number')]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
     # Set to NaN if insufficient history (fewer than window matches)
     # This is intentional - models should learn that NaN = limited history
     insufficient_history = df['matches_in_window'] < window
@@ -185,12 +190,16 @@ def compute_lineup_stability_features(
     )
 
     if len(table_check) == 0:
-        # No team_lists data for this year - return empty DataFrame
-        return pd.DataFrame(columns=[
-            'match_id', 'player_id', 'squad_id', 'round_number',
-            'lineup_changes_from_prev_round', 'lineup_stability_pct',
-            'player_was_in_prev_lineup'
-        ])
+        # No team_lists data for this year - return empty DataFrame with explicit dtypes
+        return pd.DataFrame({
+            'match_id': pd.Series(dtype='int64'),
+            'player_id': pd.Series(dtype='int64'),
+            'squad_id': pd.Series(dtype='int64'),
+            'round_number': pd.Series(dtype='int64'),
+            'lineup_changes_from_prev_round': pd.Series(dtype='float64'),
+            'lineup_stability_pct': pd.Series(dtype='float64'),
+            'player_was_in_prev_lineup': pd.Series(dtype='float64'),
+        })
 
     query = f"""
     WITH current_lineups AS (

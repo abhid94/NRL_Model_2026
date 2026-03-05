@@ -226,6 +226,11 @@ class GBMModel(BaseModel):
         for col in self._cat_features:
             if col in df.columns:
                 df[col] = df[col].astype("category")
+        # Safety net: coerce any remaining object columns to numeric
+        # (e.g., from empty DataFrames merged with object dtype)
+        for col in df.columns:
+            if df[col].dtype == object and col not in self._cat_features:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
         return df
 
 

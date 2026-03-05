@@ -18,7 +18,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.config import BOOKMAKER_DISPLAY_NAMES, DB_PATH
+from src.config import BOOKMAKER_DISPLAY_NAMES, BOOKMAKER_DISPLAY_NAMES_IO, DB_PATH
 from src.db import get_connection
 from src.ingestion.player_matcher import get_known_players, match_player_name
 from src.odds.odds_api import fetch_round_odds
@@ -319,6 +319,109 @@ def ingest_round_odds(
             conn.close()
 
 
+def ingest_bet365_odds(
+    round_number: int,
+    season: int,
+    snapshot_type: str = "closing",
+    conn: sqlite3.Connection | None = None,
+    nrl_league_slug: str | None = None,
+    ats_market_name: str | None = None,
+) -> dict[str, Any]:
+    """Fetch Bet365 odds from odds-api.io, match players, store in DB.
+
+    Supplements ingest_round_odds() which fetches from The Odds API.
+    Records go into the same ``bookmaker_odds_{year}`` table.
+
+    Parameters
+    ----------
+    round_number : int
+        Round to fetch odds for.
+    season : int
+        Season year.
+    snapshot_type : str
+        "opening" or "closing".
+    conn : sqlite3.Connection, optional
+        Database connection. If None, opens a new one.
+    nrl_league_slug : str, optional
+        NRL league slug on odds-api.io.
+    ats_market_name : str, optional
+        ATS market name on odds-api.io.
+
+    Returns
+    -------
+    dict[str, Any]
+        Summary with keys: n_raw, n_matched, n_upserted, n_unmatched,
+        bookmakers, unmatched_players, source.
+    """
+    from src.odds.odds_api_io import OddsAPIIOError, fetch_nrl_ats_odds
+
+    empty_result: dict[str, Any] = {
+        "n_raw": 0, "n_matched": 0, "n_upserted": 0,
+        "n_unmatched": 0, "bookmakers": [], "unmatched_players": [],
+        "source": "odds_api_io",
+    }
+
+    close_conn = False
+    if conn is None:
+        conn = get_connection(DB_PATH)
+        close_conn = True
+
+    try:
+        # Step 1: Fetch raw Bet365 odds
+        try:
+            raw_records = fetch_nrl_ats_odds(
+                conn=conn,
+                season=season,
+                round_number=round_number,
+                nrl_league_slug=nrl_league_slug,
+                ats_market_name=ats_market_name,
+            )
+        except OddsAPIIOError as exc:
+            LOGGER.warning("Bet365 odds fetch failed: %s", exc)
+            return empty_result
+
+        if not raw_records:
+            LOGGER.info("No Bet365 odds returned from odds-api.io")
+            return empty_result
+
+        # Step 2: Match player names to player_ids (reuse existing matcher)
+        enriched = build_odds_player_mapping(raw_records, conn, season, round_number)
+
+        # Step 3: Create table and upsert
+        create_bookmaker_odds_table(conn, season)
+        n_upserted = upsert_bookmaker_odds(conn, enriched, season, snapshot_type)
+
+        # Summary
+        n_matched = sum(1 for r in enriched if r.get("player_id") is not None)
+        n_unmatched = len(enriched) - n_matched
+        bookmakers = sorted(set(r.get("bookmaker", "") for r in enriched))
+        unmatched = sorted(set(
+            r.get("player_name_raw", "")
+            for r in enriched
+            if r.get("player_id") is None
+        ))
+
+        summary: dict[str, Any] = {
+            "n_raw": len(raw_records),
+            "n_matched": n_matched,
+            "n_upserted": n_upserted,
+            "n_unmatched": n_unmatched,
+            "bookmakers": bookmakers,
+            "unmatched_players": unmatched,
+            "source": "odds_api_io",
+        }
+        LOGGER.info(
+            "Bet365 odds ingestion: %d raw, %d matched, %d upserted, %d unmatched",
+            summary["n_raw"], summary["n_matched"],
+            summary["n_upserted"], summary["n_unmatched"],
+        )
+        return summary
+
+    finally:
+        if close_conn:
+            conn.close()
+
+
 def get_best_bookmaker_odds(
     conn: sqlite3.Connection,
     match_id: int,
@@ -437,9 +540,10 @@ def get_round_bookmaker_odds(
 
     result = best.merge(pivot, on=["match_id", "player_id"], how="left")
 
-    # Map bookmaker keys to display names
+    # Map bookmaker keys to display names (merge both sources)
+    all_display_names = {**BOOKMAKER_DISPLAY_NAMES, **BOOKMAKER_DISPLAY_NAMES_IO}
     result["best_bookmaker_display"] = result["best_bookmaker"].map(
-        BOOKMAKER_DISPLAY_NAMES
+        all_display_names
     ).fillna(result["best_bookmaker"])
 
     return result

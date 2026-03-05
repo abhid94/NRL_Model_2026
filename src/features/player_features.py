@@ -229,6 +229,102 @@ def compute_player_features(
     return features.reset_index(drop=True)
 
 
+def compute_typical_position(
+    connection: Connection,
+    year: int | str,
+    *,
+    as_of_round: int | None = None,
+    lookback: int = 10,
+) -> pd.DataFrame:
+    """Compute each player's typical jersey and position from recent history.
+
+    Uses the mode of ``jumper_number`` over the last *lookback* matches
+    (strictly before the current round) to determine the player's usual
+    position.  This lets the model distinguish a natural winger listed as
+    jersey 18 from a career bench player.
+
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Database connection.
+    year : int | str
+        Season year to compute for.
+    as_of_round : int | None
+        If provided, only uses matches from rounds < as_of_round.
+    lookback : int
+        Number of recent matches to consider for the mode.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Columns: player_id, typical_jersey, typical_position_code,
+        typical_position_label.  One row per player who has at least one
+        prior match.
+    """
+    normalized_year = db.normalize_year(year)
+
+    # Gather jumper_number history from current + prior season
+    frames: list[pd.DataFrame] = []
+
+    for yr in (normalized_year - 1, normalized_year):
+        ps_table = db.get_table("player_stats", yr)
+        m_table = db.get_table("matches", yr)
+        try:
+            round_filter = ""
+            if yr == normalized_year and as_of_round is not None:
+                round_filter = f"AND m.round_number < {int(as_of_round)}"
+
+            q = f"""
+                SELECT ps.player_id, ps.jumper_number, m.round_number,
+                       {yr} AS season
+                FROM {ps_table} ps
+                JOIN {m_table} m ON ps.match_id = m.match_id
+                WHERE 1=1 {round_filter}
+                ORDER BY m.round_number DESC
+            """
+            frame = db.fetch_df(connection, q)
+            if not frame.empty:
+                frames.append(frame)
+        except Exception:
+            pass  # prior season table may not exist
+
+    if not frames:
+        return pd.DataFrame(
+            columns=["player_id", "typical_jersey", "typical_position_code",
+                     "typical_position_label"]
+        )
+
+    history = pd.concat(frames, ignore_index=True)
+    # Sort newest first, then take last N matches per player
+    history.sort_values(
+        ["player_id", "season", "round_number"],
+        ascending=[True, False, False],
+        inplace=True,
+    )
+    recent = history.groupby("player_id").head(lookback)
+
+    # Mode of jumper_number (most common jersey)
+    typical = (
+        recent.groupby("player_id")["jumper_number"]
+        .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0])
+        .reset_index()
+        .rename(columns={"jumper_number": "typical_jersey"})
+    )
+
+    typical["typical_position_code"] = typical["typical_jersey"].apply(
+        lambda j: position_from_jersey(int(j)).code
+    )
+    typical["typical_position_label"] = typical["typical_jersey"].apply(
+        lambda j: position_from_jersey(int(j)).label
+    )
+
+    LOGGER.info(
+        "Computed typical position for %d players (season=%s, as_of_round=%s)",
+        len(typical), year, as_of_round,
+    )
+    return typical
+
+
 def compute_cross_season_priors(
     connection: Connection,
     target_year: int | str,

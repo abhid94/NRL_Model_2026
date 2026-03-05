@@ -40,6 +40,9 @@ _MIN_PLAYERS_PER_TEAM = 13  # at least 13 starters expected
 # Regex: "1. Player Name" or "1 Player Name"
 _NUMBERED_PLAYER_RE = re.compile(r"^(\d{1,2})[.\s]+(.+)$")
 
+# Regex: "1. Player Name" pairs in flattened text (handles nested <strong> tags)
+_JERSEY_NAME_PAIR_RE = re.compile(r'(\d{1,2})\.\s+([A-Z][^\d]+?)(?=\s*\d{1,2}\.\s|$)')
+
 # Regex for nrl.com article format: "Fullback for Knights is number 1 Kalyn Ponga"
 _NRL_ARTICLE_RE = re.compile(
     r"^(?P<position>\w[\w\s-]*)\s+for\s+(?P<team>[\w\s]+)\s+is\s+number\s+(?P<jersey>\d+)\s+(?P<name>.+)$",
@@ -119,29 +122,25 @@ def _parse_league_unlimited(html: str) -> list[dict[str, Any]]:
 
         # Player list: <p> with SQUAD comment inside
         elif element.name == "p" and current_team is not None:
-            # Check for SQUAD comment inside this <p>
+            # Check for SQUAD comment inside this <p> (use descendants
+            # because the 2026 format nests comments inside <strong>)
             has_squad_comment = any(
                 isinstance(child, Comment) and "SQUAD" in child
-                for child in element.children
+                for child in element.descendants
             )
             if not has_squad_comment:
                 continue
 
-            # Extract jersey numbers (in <strong> tags) and names (text nodes between them)
-            # Build alternating sequence: strong_text, following_text, strong_text, ...
-            parts: list[tuple[str, str]] = []  # (jersey_text, player_name)
-            pending_jersey: int | None = None
-
-            for child in element.children:
-                if hasattr(child, "name") and child.name == "strong":
-                    strong_text = child.get_text(strip=True).rstrip(".")
-                    if strong_text.isdigit():
-                        pending_jersey = int(strong_text)
-                elif isinstance(child, str) and pending_jersey is not None:
-                    name = child.strip().strip(".")
-                    if name:
-                        parts.append((pending_jersey, name))
-                        pending_jersey = None
+            # Extract jersey-name pairs from the flattened text.
+            # Handles any nesting of <strong> tags (2026 format wraps
+            # the entire squad block in an outer <strong>).
+            raw_text = element.get_text(" ", strip=False)
+            parts: list[tuple[int, str]] = []
+            for m in _JERSEY_NAME_PAIR_RE.finditer(raw_text):
+                jersey = int(m.group(1))
+                name = m.group(2).strip().rstrip(".")
+                if name:
+                    parts.append((jersey, name))
 
             for jersey, name in parts:
                 if jersey <= 25 and name:

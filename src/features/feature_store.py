@@ -25,7 +25,11 @@ import numpy as np
 import pandas as pd
 import logging
 
-from src.features.player_features import compute_player_features, compute_cross_season_priors
+from src.features.player_features import (
+    compute_player_features,
+    compute_cross_season_priors,
+    compute_typical_position,
+)
 from src.features.team_features import compute_team_features
 from src.features.matchup_features import compute_matchup_features
 from src.features.game_context_features import compute_game_context_features, compute_schedule_features
@@ -170,6 +174,40 @@ def build_feature_store(
         df['is_starter'] = (df['jersey_number'].fillna(99) <= 13).astype(int)
         df['jumper_number'] = df['jersey_number']
         logger.info("Derived position features from jersey_number")
+
+    # 6b. Compute typical position features (uses historical data only)
+    try:
+        typical_df = compute_typical_position(conn, season, as_of_round=as_of_round)
+        if not typical_df.empty:
+            df = df.merge(typical_df, on='player_id', how='left')
+
+            # Override position_code with scraped_position from team_lists when available
+            if 'scraped_position' in df.columns:
+                from src.config import JERSEY_NUMBER_POSITION, PositionInfo
+                # Map scraped position names to codes (e.g. "Fullback" -> "FB")
+                _name_to_code = {p.label: p.code for p in JERSEY_NUMBER_POSITION.values()}
+                mask = df['scraped_position'].notna() & (df['scraped_position'] != '')
+                if mask.any():
+                    mapped_codes = df.loc[mask, 'scraped_position'].map(_name_to_code)
+                    valid = mapped_codes.notna()
+                    if valid.any():
+                        df.loc[mask & valid.reindex(df.index, fill_value=False), 'position_code'] = mapped_codes[valid]
+                        logger.info("Overrode position_code from scraped_position for %d rows",
+                                    valid.sum())
+
+            # Compute is_positional_change: 1 if current position differs from typical
+            if 'typical_position_code' in df.columns and 'position_code' in df.columns:
+                df['is_positional_change'] = (
+                    df['typical_position_code'].notna()
+                    & (df['position_code'] != df['typical_position_code'])
+                ).astype(int)
+            else:
+                df['is_positional_change'] = 0
+
+            logger.info(f"Typical position features: {len(typical_df)} players, "
+                        f"{df['is_positional_change'].sum()} positional changes")
+    except Exception:
+        logger.warning(f"Typical position features unavailable for {season} — skipping")
 
     # Join own team features (join on match_id + squad_id)
     if team_df is not None:
@@ -324,16 +362,52 @@ def _get_base_observations(
         """
 
         df = pd.read_sql_query(query, conn)
-        return df
+
+        # When filtering to a specific round, check if team_lists covers
+        # more matches (i.e. some matches haven't been played yet).
+        # If so, fall through to team_lists so we predict ALL matches.
+        use_player_stats = True
+        if as_of_round and not df.empty:
+            tl_table = f"team_lists_{season}"
+            if table_exists(conn, tl_table):
+                tl_match_count = pd.read_sql_query(
+                    f"SELECT COUNT(DISTINCT match_id) AS n FROM {tl_table} "
+                    f"WHERE round_number = {as_of_round}",
+                    conn,
+                )["n"].iloc[0]
+                ps_match_count = df["match_id"].nunique()
+                if tl_match_count > ps_match_count:
+                    logger.info(
+                        f"player_stats has {ps_match_count} matches but "
+                        f"team_lists has {tl_match_count} for round {as_of_round} "
+                        f"— falling back to team_lists"
+                    )
+                    use_player_stats = False
+
+        if use_player_stats and not df.empty:
+            return df
+
+        if df.empty:
+            logger.info(
+                f"No player_stats rows for round {as_of_round} — "
+                f"falling back to team_lists"
+            )
 
     # Fallback: build base observations from team_lists + matches
     # Used for new seasons where player_stats doesn't exist yet (e.g., 2026 Round 1)
     logger.info(
-        f"No {player_stats_table} table — building base observations from "
+        f"Building base observations from "
         f"team_lists_{season} + matches_{season}"
     )
 
     round_filter = f"AND tl.round_number = {as_of_round}" if as_of_round else ""
+
+    # Check if scraped_position column exists in team_lists
+    tl_table = f"team_lists_{season}"
+    tl_cols = {
+        row[1] for row in conn.execute(f"PRAGMA table_info({tl_table})").fetchall()
+    }
+    scraped_pos_select = ", tl.scraped_position" if "scraped_position" in tl_cols else ""
 
     query = f"""
     SELECT
@@ -347,7 +421,8 @@ def _get_base_observations(
         tl.round_number,
         CASE WHEN tl.squad_id = m.home_squad_id THEN 1 ELSE 0 END AS is_home,
         tl.jersey_number
-    FROM team_lists_{season} tl
+        {scraped_pos_select}
+    FROM {tl_table} tl
     JOIN matches_{season} m ON tl.match_id = m.match_id
     WHERE m.match_type = 'H'
     AND tl.player_id IS NOT NULL

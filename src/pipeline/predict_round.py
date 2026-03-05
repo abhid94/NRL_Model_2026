@@ -58,7 +58,10 @@ def predict_round(
 
     if round_df.empty:
         LOGGER.warning("No data for season %d round %d", season, round_number)
-        return pd.DataFrame()
+        return pd.DataFrame(columns=[
+            "match_id", "player_id", "squad_id", "round_number", "season",
+            "model_prob", "edge", "is_eligible",
+        ])
 
     # Predict
     model_probs = model.predict_proba(round_df)
@@ -222,7 +225,10 @@ def build_and_predict_round(
 
     if round_store.empty:
         LOGGER.warning("No feature store data for round %d", round_number)
-        return pd.DataFrame()
+        return pd.DataFrame(columns=[
+            "match_id", "player_id", "squad_id", "round_number", "season",
+            "model_prob", "edge", "is_eligible",
+        ])
 
     # Fit model on training data
     if "scored_try" in training_store.columns:

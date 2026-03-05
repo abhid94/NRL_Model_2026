@@ -30,7 +30,7 @@ from src.config import (
     FEATURE_STORE_DIR,
     MODEL_ARTIFACTS_DIR,
 )
-from src.db import get_connection
+from src.db import get_connection, get_table, table_exists
 from src.features.feature_store import build_feature_store, save_feature_store
 from src.models.baseline import BaseModel
 from src.models.calibration import CalibratedModel
@@ -44,6 +44,38 @@ LOGGER = logging.getLogger(__name__)
 DRAWDOWN_WARNING = 0.15
 DRAWDOWN_HALT = 0.25
 DRAWDOWN_STOP = 0.40
+
+
+def discover_training_seasons() -> list[int]:
+    """Query the database for seasons that have player_stats data.
+
+    Looks for ``player_stats_{year}`` tables with at least one row and
+    returns the year suffixes sorted ascending.
+
+    Returns
+    -------
+    list[int]
+        Sorted list of season years with available training data.
+    """
+    conn = get_connection(DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'player_stats_%'"
+        ).fetchall()
+        seasons: list[int] = []
+        for (name,) in rows:
+            suffix = name.replace("player_stats_", "")
+            try:
+                year = int(suffix)
+            except ValueError:
+                continue
+            # Verify the table actually has data
+            count = conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
+            if count > 0:
+                seasons.append(year)
+        return sorted(seasons)
+    finally:
+        conn.close()
 
 
 def get_default_model() -> BaseModel:
@@ -76,6 +108,7 @@ def run_weekly_pipeline(
     training_seasons: list[int] | None = None,
     rebuild_features: bool = True,
     flat_stake: float | None = None,
+    pull_odds: bool = True,
 ) -> dict[str, Any]:
     """Run the full weekly pipeline.
 
@@ -95,6 +128,9 @@ def run_weekly_pipeline(
         If True, rebuild feature stores from DB. If False, load from disk.
     flat_stake : float | None
         If set, use flat staking instead of Kelly.
+    pull_odds : bool
+        If True, ingest latest team lists and odds from external APIs.
+        If False, skip ingestion and use whatever is already in the DB.
 
     Returns
     -------
@@ -110,48 +146,52 @@ def run_weekly_pipeline(
         model = get_default_model()
 
     if training_seasons is None:
-        training_seasons = [2024, 2025]
+        training_seasons = discover_training_seasons()
         if season not in training_seasons:
             training_seasons.append(season)
 
     # Step 0: Ingest team lists (idempotent — safe to re-run)
-    LOGGER.info("Step 0: Ingesting team lists for %d Round %d", season, round_number)
-    try:
-        from src.ingestion.ingest_team_lists import ingest_round_team_lists
-        tl_summary = ingest_round_team_lists(round_number=round_number, year=season)
-        LOGGER.info(
-            "Team lists: %d/%d players matched (%d unmatched)",
-            tl_summary["n_matched"],
-            tl_summary["n_scraped"],
-            tl_summary["n_unmatched"],
-        )
-        if tl_summary["unmatched_players"]:
-            LOGGER.warning("Unmatched players: %s", tl_summary["unmatched_players"])
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Team list ingestion failed (non-fatal): %s", exc)
-        tl_summary = {}
-
-    # Step 0.5: Ingest bookmaker odds from The Odds API (non-fatal)
-    LOGGER.info("Step 0.5: Ingesting bookmaker odds for %d Round %d", season, round_number)
+    tl_summary: dict = {}
     odds_summary: dict = {}
-    try:
-        from src.odds.bookmaker import ingest_round_odds as _ingest_odds
-        odds_summary = _ingest_odds(
-            round_number=round_number, season=season, snapshot_type="closing",
-        )
-        LOGGER.info(
-            "Bookmaker odds: %d raw, %d matched, %d upserted (%s)",
-            odds_summary.get("n_raw", 0),
-            odds_summary.get("n_matched", 0),
-            odds_summary.get("n_upserted", 0),
-            odds_summary.get("bookmakers", []),
-        )
-        if odds_summary.get("unmatched_players"):
-            LOGGER.warning(
-                "Unmatched odds players: %s", odds_summary["unmatched_players"][:10]
+    if pull_odds:
+        LOGGER.info("Step 0: Ingesting team lists for %d Round %d", season, round_number)
+        try:
+            from src.ingestion.ingest_team_lists import ingest_round_team_lists
+            tl_summary = ingest_round_team_lists(round_number=round_number, year=season)
+            LOGGER.info(
+                "Team lists: %d/%d players matched (%d unmatched)",
+                tl_summary["n_matched"],
+                tl_summary["n_scraped"],
+                tl_summary["n_unmatched"],
             )
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Odds API ingestion failed (non-fatal): %s", exc)
+            if tl_summary["unmatched_players"]:
+                LOGGER.warning("Unmatched players: %s", tl_summary["unmatched_players"])
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Team list ingestion failed (non-fatal): %s", exc)
+            tl_summary = {}
+
+        # Step 0.5: Ingest bookmaker odds from The Odds API (non-fatal)
+        LOGGER.info("Step 0.5: Ingesting bookmaker odds for %d Round %d", season, round_number)
+        try:
+            from src.odds.bookmaker import ingest_round_odds as _ingest_odds
+            odds_summary = _ingest_odds(
+                round_number=round_number, season=season, snapshot_type="closing",
+            )
+            LOGGER.info(
+                "Bookmaker odds: %d raw, %d matched, %d upserted (%s)",
+                odds_summary.get("n_raw", 0),
+                odds_summary.get("n_matched", 0),
+                odds_summary.get("n_upserted", 0),
+                odds_summary.get("bookmakers", []),
+            )
+            if odds_summary.get("unmatched_players"):
+                LOGGER.warning(
+                    "Unmatched odds players: %s", odds_summary["unmatched_players"][:10]
+                )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Odds API ingestion failed (non-fatal): %s", exc)
+    else:
+        LOGGER.info("Steps 0/0.5: Skipping odds ingestion (pull_odds=False)")
 
     # Step 1: Build/load feature stores
     LOGGER.info("Step 1: Loading feature stores")

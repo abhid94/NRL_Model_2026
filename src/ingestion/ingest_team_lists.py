@@ -76,6 +76,9 @@ _NRL_PLAYER_MAPPING_INDEXES = [
 def create_team_lists_table(conn: sqlite3.Connection, year: int) -> None:
     """Create team_lists_{year} table if it does not exist.
 
+    Also migrates existing tables that lack the ``scraped_position`` column
+    (e.g. ``team_lists_2025`` created before the column was added to the DDL).
+
     Parameters
     ----------
     conn : sqlite3.Connection
@@ -86,6 +89,15 @@ def create_team_lists_table(conn: sqlite3.Connection, year: int) -> None:
     year = normalize_year(year)
     table = get_table("team_lists", year)
     conn.execute(_TEAM_LISTS_DDL.format(table=table))
+
+    # Migrate: add scraped_position column if missing (older tables)
+    existing_cols = {
+        row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if "scraped_position" not in existing_cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN scraped_position TEXT")
+        LOGGER.info("Migrated %s: added scraped_position column", table)
+
     conn.commit()
     LOGGER.info("Table ready: %s", table)
 

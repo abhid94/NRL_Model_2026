@@ -58,7 +58,7 @@ Bookmaker margins are 15-20%. If a player's true probability is 30%, the bookie 
 
 **4. Edge-Specific Attack/Defence**
 - Teams have measurably different left/right edge attack patterns (validated in data).
-- Edge mapping: Left = jerseys 2,3,11; Right = jerseys 4,5,12; Middle = jerseys 8,9,10,13
+- Edge mapping: Left = jerseys 4,5,11; Right = jerseys 2,3,12; Middle = jerseys 8,9,10,13
 - Need: `team_left_edge_try_pct_rolling_5`, `conceded_to_left_edge_rolling_5`
 - Then: `edge_matchup_score = attacking_edge_strength * defending_edge_weakness`
 

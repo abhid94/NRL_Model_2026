@@ -18,12 +18,13 @@ DEFAULT_TEAM_FEATURE_WINDOWS = (3, 5, 10)
 
 # Edge mappings for try scoring analysis
 # Based on validated team edge attack patterns (see docs/plans/ats_strategy.md)
+# NRL convention: jersey 2 = Right Wing, 3 = Right Centre, 4 = Left Centre, 5 = Left Wing
 JERSEY_TO_EDGE: Mapping[int, str] = {
-    2: "left",  # Left Wing
-    3: "left",  # Left Centre
+    2: "right",  # Right Wing
+    3: "right",  # Right Centre
     11: "left",  # Left Second Row
-    4: "right",  # Right Centre
-    5: "right",  # Right Wing
+    4: "left",  # Left Centre
+    5: "left",  # Left Wing
     12: "right",  # Right Second Row
     8: "middle",  # Prop
     9: "middle",  # Hooker
@@ -111,6 +112,10 @@ TEAM_NICKNAME_OVERRIDES: dict[str, str] = {
     "New Zealand Warriors": "Warriors",
     "Cronulla Sutherland Sharks": "Cronulla-Sutherland Sharks",
     "Manly Warringah Sea Eagles": "Manly-Warringah Sea Eagles",
+    # odds-api.io uses slightly different names
+    "Dolphins (Nrl)": "Dolphins",
+    "Manly Sea Eagles": "Manly-Warringah Sea Eagles",
+    "Cronulla-Sutherland Sharks": "Cronulla-Sutherland Sharks",
 }
 
 
@@ -137,6 +142,36 @@ BOOKMAKER_DISPLAY_NAMES: dict[str, str] = {
 # Margin correction: bookmaker implied probs are ~12-18% inflated vs Betfair's 4-8%
 # Multiply bookmaker implied_prob by this factor to approximate Betfair scale.
 BOOKMAKER_MARGIN_CORRECTION: float = 0.88
+
+# ---------------------------------------------------------------------------
+# Odds-API.io Configuration (https://odds-api.io — Bet365 odds source)
+# Free tier: 2 bookmakers, 100 requests/hour
+# ---------------------------------------------------------------------------
+ODDS_API_IO_BASE_URL: str = "https://api.odds-api.io/v3"
+ODDS_API_IO_SPORT: str = "rugby"
+ODDS_API_IO_BOOKMAKERS: tuple[str, ...] = ("Bet365",)  # Case-sensitive on this API
+ODDS_API_IO_REQUEST_TIMEOUT: int = 10
+BOOKMAKER_DISPLAY_NAMES_IO: dict[str, str] = {
+    "bet365": "Bet365",
+}
+
+# ---------------------------------------------------------------------------
+# Champion Data API Configuration
+# ---------------------------------------------------------------------------
+CHAMPION_DATA_COMP_IDS: dict[int, int] = {2024: 12445, 2025: 12755, 2026: 12999}
+CHAMPION_DATA_BASE_URL: str = "https://mc.championdata.com/data"
+
+# Edge side mappings for jersey → attacking side (used in ingestion)
+# NRL convention: jersey 2 = Right Wing, 3 = Right Centre, 4 = Left Centre, 5 = Left Wing
+JERSEY_TO_SIDE: dict[int, str] = {
+    4: "Left",
+    5: "Left",
+    11: "Left",
+    2: "Right",
+    3: "Right",
+    12: "Right",
+}
+JERSEY_DEFAULT_SIDE: str = "Middle"
 
 
 def position_from_jersey(jersey_number: int | None) -> PositionInfo:

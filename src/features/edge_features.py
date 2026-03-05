@@ -4,8 +4,8 @@ This module exploits validated team edge attack patterns (e.g., Titans 64.2% lef
 by creating features that capture left/right/middle edge attack and defence profiles.
 
 Edge mapping:
-- Left edge: jerseys 2, 3, 11 (left wing, left centre, left second row)
-- Right edge: jerseys 4, 5, 12 (right centre, right wing, right second row)
+- Left edge: jerseys 4, 5, 11 (left centre, left wing, left second row)
+- Right edge: jerseys 2, 3, 12 (right wing, right centre, right second row)
 - Middle: jerseys 8, 9, 10, 13 (props, hooker, lock)
 - Other: jerseys 1, 6, 7, 14+ (fullback, halves, interchange/reserves)
 

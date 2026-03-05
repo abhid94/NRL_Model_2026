@@ -54,8 +54,9 @@ def _normalise_name(name: str) -> str:
 def get_known_players(conn: sqlite3.Connection) -> pd.DataFrame:
     """Load all known players from the database.
 
-    Combines players_2024 and players_2025, deduplicating by player_id.
-    Adds a normalised_display_name and surname_lower column for matching.
+    Dynamically discovers all ``players_{year}`` tables and combines them,
+    deduplicating by player_id.  Adds normalised_display_name and
+    surname_lower columns for matching.
 
     Parameters
     ----------
@@ -68,19 +69,24 @@ def get_known_players(conn: sqlite3.Connection) -> pd.DataFrame:
         Columns: player_id, display_name, firstname, surname,
                  normalised_display_name, surname_lower, squad_ids (list).
     """
+    # Dynamically discover all players_{year} tables
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'players_%'"
+    ).fetchall()
+
     queries: list[str] = []
-    for year in (2024, 2025):
+    for (table_name,) in tables:
         try:
-            conn.execute(f"SELECT 1 FROM players_{year} LIMIT 1")
+            conn.execute(f"SELECT 1 FROM {table_name} LIMIT 1")
             queries.append(
                 f"SELECT DISTINCT player_id, display_name, firstname, surname "
-                f"FROM players_{year}"
+                f"FROM {table_name}"
             )
         except Exception:  # noqa: BLE001
             pass
 
     if not queries:
-        raise RuntimeError("No players_2024 or players_2025 table found in database")
+        raise RuntimeError("No players_{year} tables found in database")
 
     union_sql = " UNION " .join(queries)
     df = pd.read_sql_query(union_sql, conn)
@@ -92,12 +98,17 @@ def get_known_players(conn: sqlite3.Connection) -> pd.DataFrame:
     df["surname_lower"] = df["surname"].str.lower().str.strip()
 
     # Load squad-level appearances to know which teams each player has played for
+    # Dynamically discover all player_stats_{year} tables
+    stats_tables = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'player_stats_%'"
+    ).fetchall()
+
     squad_queries: list[str] = []
-    for year in (2024, 2025):
+    for (table_name,) in stats_tables:
         try:
-            conn.execute(f"SELECT 1 FROM player_stats_{year} LIMIT 1")
+            conn.execute(f"SELECT 1 FROM {table_name} LIMIT 1")
             squad_queries.append(
-                f"SELECT DISTINCT player_id, squad_id FROM player_stats_{year}"
+                f"SELECT DISTINCT player_id, squad_id FROM {table_name}"
             )
         except Exception:  # noqa: BLE001
             pass

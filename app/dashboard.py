@@ -141,9 +141,13 @@ def _run_pipeline(season: int, round_number: int, bankroll: float,
 def _merge_form_stats(predictions: pd.DataFrame, season: int,
                       round_number: int) -> pd.DataFrame:
     """Merge rolling form stats from the feature store."""
+    if predictions.empty or "match_id" not in predictions.columns:
+        return predictions
+
     from src.config import FEATURE_STORE_DIR
 
-    form_cols = ["rolling_tries_3", "rolling_line_breaks_3", "rolling_attack_tackle_breaks_3"]
+    form_cols = ["rolling_tries_3", "rolling_line_breaks_3", "rolling_attack_tackle_breaks_3",
+                  "typical_position_code", "is_positional_change"]
     path = FEATURE_STORE_DIR / f"feature_store_{season}.parquet"
     if not path.exists():
         return predictions
@@ -155,6 +159,52 @@ def _merge_form_stats(predictions: pd.DataFrame, season: int,
     if not new_cols:
         return predictions
     return predictions.merge(fs[merge_keys + new_cols], on=merge_keys, how="left")
+
+
+# ---------------------------------------------------------------------------
+# Data management helpers
+# ---------------------------------------------------------------------------
+
+def _update_team_lists(season: int, round_number: int) -> None:
+    """Scrape and ingest team lists for the selected round."""
+    from src.ingestion.ingest_team_lists import ingest_round_team_lists
+
+    with st.spinner(f"Updating team lists for {season} Round {round_number}..."):
+        try:
+            summary = ingest_round_team_lists(round_number=round_number, year=season)
+            st.cache_data.clear()
+            st.success(
+                f"Team lists updated: {summary['n_matched']}/{summary['n_scraped']} "
+                f"players matched, {summary['n_inserted']} rows upserted"
+            )
+            if summary.get("unmatched_players"):
+                st.warning(
+                    f"Unmatched players: {', '.join(summary['unmatched_players'])}"
+                )
+        except Exception as exc:
+            LOGGER.exception("Team list update failed")
+            st.error(f"Team list update failed: {exc}")
+
+
+def _pull_game_stats(season: int) -> None:
+    """Fetch and ingest completed match data from Champion Data."""
+    from src.ingestion.ingest_match_data import fetch_and_ingest_completed_matches
+
+    with st.spinner(f"Pulling game stats for {season}..."):
+        try:
+            summary = fetch_and_ingest_completed_matches(year=season)
+            st.cache_data.clear()
+            st.success(
+                f"Game stats: {summary['n_ingested']} matches ingested, "
+                f"{summary['n_failed']} failed, "
+                f"{summary['n_pending']} were pending"
+            )
+            if summary.get("errors"):
+                for err in summary["errors"][:5]:
+                    st.warning(err)
+        except Exception as exc:
+            LOGGER.exception("Game stats pull failed")
+            st.error(f"Game stats pull failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -236,10 +286,18 @@ def _build_display_df(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[int, str]]:
     best_col_per_row: dict[int, str] = {}
 
     for idx, (_, r) in enumerate(df.iterrows()):
+        # Show "Usual Pos" only when it differs from current position
+        pos = r.get("position_code", "")
+        typical_pos = r.get("typical_position_code")
+        usual_pos = ""
+        if pd.notna(typical_pos) and typical_pos and typical_pos != pos:
+            usual_pos = str(typical_pos)
+
         row: dict = {
             "Rank": int(r["match_rank"]) if pd.notna(r.get("match_rank")) else "",
             "Player": r.get("player_name", f"ID:{r['player_id']}"),
-            "Pos": r.get("position_code", ""),
+            "Pos": pos,
+            "Usual Pos": usual_pos,
             "XIII": "Y" if r.get("is_starter") else "",
             "Model %": _format_pct(r.get("model_prob")),
             "Best Odds": _format_odds(r.get("best_odds")),
@@ -341,6 +399,16 @@ def main() -> None:
         if run_clicked:
             _run_pipeline(season, round_number, bankroll, flat_stake, min_edge, pull_odds)
 
+        # --- Data Management ---
+        st.divider()
+        st.subheader("Data Management")
+
+        if st.button("Update Team Lists", use_container_width=True):
+            _update_team_lists(season, round_number)
+
+        if st.button("Pull Game Stats", use_container_width=True):
+            _pull_game_stats(season)
+
     # --- Main area ---
     if "predictions" not in st.session_state:
         st.info("Select season & round, then click **Run Pipeline** to generate predictions.")
@@ -418,7 +486,15 @@ def main() -> None:
         header += bet_tag
 
         with st.expander(header, expanded=True):
-            match_preds = match_preds.sort_values("match_rank")
+            # Sort: starters first (is_starter DESC), then by model rank
+            sort_cols = []
+            sort_asc = []
+            if "is_starter" in match_preds.columns:
+                sort_cols.append("is_starter")
+                sort_asc.append(False)  # starters (1) above reserves (0)
+            sort_cols.append("match_rank")
+            sort_asc.append(True)
+            match_preds = match_preds.sort_values(sort_cols, ascending=sort_asc)
             display, best_cols = _build_display_df(match_preds)
             styled = _apply_styles(display.style, best_cols)
             st.dataframe(styled, use_container_width=True, hide_index=True)

@@ -17,16 +17,16 @@ class TestEdgeClassification:
     """Test jersey number to edge mapping."""
 
     def test_left_edge_jerseys(self):
-        """Left edge: 2, 3, 11."""
-        assert classify_jersey_to_edge(2) == "left"  # Left wing
-        assert classify_jersey_to_edge(3) == "left"  # Left centre
-        assert classify_jersey_to_edge(11) == "left"  # Left second row
+        """Left edge: 4, 5, 11."""
+        assert classify_jersey_to_edge(4) == "left"  # Left Centre
+        assert classify_jersey_to_edge(5) == "left"  # Left Wing
+        assert classify_jersey_to_edge(11) == "left"  # Left Second Row
 
     def test_right_edge_jerseys(self):
-        """Right edge: 4, 5, 12."""
-        assert classify_jersey_to_edge(4) == "right"  # Right centre
-        assert classify_jersey_to_edge(5) == "right"  # Right wing
-        assert classify_jersey_to_edge(12) == "right"  # Right second row
+        """Right edge: 2, 3, 12."""
+        assert classify_jersey_to_edge(2) == "right"  # Right Wing
+        assert classify_jersey_to_edge(3) == "right"  # Right Centre
+        assert classify_jersey_to_edge(12) == "right"  # Right Second Row
 
     def test_middle_jerseys(self):
         """Middle: 8, 9, 10, 13."""
@@ -208,13 +208,13 @@ class TestPlayerEdgeFeatures:
         )
 
         # Check some specific cases
-        left_wing = result[result["jumper_number"] == 2]
-        if not left_wing.empty:
-            assert (left_wing["player_edge"] == "left").all()
-
-        right_wing = result[result["jumper_number"] == 5]
+        right_wing = result[result["jumper_number"] == 2]
         if not right_wing.empty:
             assert (right_wing["player_edge"] == "right").all()
+
+        left_wing = result[result["jumper_number"] == 5]
+        if not left_wing.empty:
+            assert (left_wing["player_edge"] == "left").all()
 
         hooker = result[result["jumper_number"] == 9]
         if not hooker.empty:
