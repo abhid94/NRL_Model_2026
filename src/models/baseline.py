@@ -49,7 +49,7 @@ class BaseModel(ABC):
     """Abstract base for ATS probability models."""
 
     @abstractmethod
-    def fit(self, X: pd.DataFrame, y: np.ndarray) -> None:
+    def fit(self, X: pd.DataFrame, y: np.ndarray, **kwargs) -> None:
         """Fit the model on training data."""
 
     @abstractmethod

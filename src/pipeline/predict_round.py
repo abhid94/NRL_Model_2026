@@ -25,6 +25,7 @@ def predict_round(
     season: int,
     round_number: int,
     conn: sqlite3.Connection | None = None,
+    exclude_player_ids: set[int] | None = None,
 ) -> pd.DataFrame:
     """Generate predictions for a single round.
 
@@ -41,6 +42,8 @@ def predict_round(
     conn : sqlite3.Connection, optional
         Database connection. If provided and season >= 2026, multi-bookmaker
         odds are loaded and used for edge calculation.
+    exclude_player_ids : set[int], optional
+        Player IDs to exclude from predictions (e.g. late withdrawals).
 
     Returns
     -------
@@ -55,6 +58,16 @@ def predict_round(
         & (feature_store["round_number"] == round_number)
     )
     round_df = feature_store[mask].copy()
+
+    # Exclude withdrawn/dropped players
+    if exclude_player_ids:
+        n_before = len(round_df)
+        round_df = round_df[~round_df["player_id"].isin(exclude_player_ids)]
+        n_excluded = n_before - len(round_df)
+        if n_excluded > 0:
+            LOGGER.info(
+                "Excluded %d players by ID: %s", n_excluded, exclude_player_ids,
+            )
 
     if round_df.empty:
         LOGGER.warning("No data for season %d round %d", season, round_number)
@@ -192,6 +205,7 @@ def build_and_predict_round(
     training_store: pd.DataFrame,
     season: int,
     round_number: int,
+    exclude_player_ids: set[int] | None = None,
 ) -> pd.DataFrame:
     """Build features for a round and generate predictions.
 
@@ -211,6 +225,8 @@ def build_and_predict_round(
         Target season.
     round_number : int
         Target round.
+    exclude_player_ids : set[int], optional
+        Player IDs to exclude from predictions (e.g. late withdrawals).
 
     Returns
     -------
@@ -238,7 +254,10 @@ def build_and_predict_round(
         LOGGER.warning("No scored_try in training store; model must be pre-fitted")
 
     # Predict
-    return predict_round(model, round_store, season, round_number)
+    return predict_round(
+        model, round_store, season, round_number,
+        exclude_player_ids=exclude_player_ids,
+    )
 
 
 def _add_bookmaker_odds(
@@ -269,7 +288,10 @@ def _add_bookmaker_odds(
         Enriched predictions.
     """
     try:
-        from src.odds.bookmaker import get_round_bookmaker_odds
+        from src.odds.bookmaker import (
+            get_bookmaker_correction,
+            get_round_bookmaker_odds,
+        )
 
         bk_df = get_round_bookmaker_odds(conn, round_number, season)
     except Exception as exc:  # noqa: BLE001
@@ -281,14 +303,24 @@ def _add_bookmaker_odds(
         return df
 
     # Merge bookmaker odds onto predictions
-    merge_cols = [c for c in bk_df.columns if c not in ("match_id", "player_id")]
     df = df.merge(
         bk_df,
         on=["match_id", "player_id"],
         how="left",
     )
 
-    # Recompute edge against best bookmaker implied prob
+    # Apply per-bookmaker margin correction to best_implied_prob
+    if "best_implied_prob" in df.columns and "best_bookmaker" in df.columns:
+        df["best_implied_prob"] = df.apply(
+            lambda row: (
+                row["best_implied_prob"] * get_bookmaker_correction(row["best_bookmaker"])
+                if pd.notna(row.get("best_bookmaker")) and pd.notna(row.get("best_implied_prob"))
+                else row["best_implied_prob"]
+            ),
+            axis=1,
+        )
+
+    # Recompute edge against best bookmaker implied prob (margin-corrected)
     if "best_implied_prob" in df.columns:
         df["edge"] = np.where(
             df["best_implied_prob"].notna(),

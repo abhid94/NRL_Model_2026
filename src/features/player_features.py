@@ -11,7 +11,13 @@ import numpy as np
 import pandas as pd
 
 from .. import db
-from ..config import DEFAULT_PLAYER_FEATURE_WINDOWS, position_from_jersey
+from ..config import (
+    BAYESIAN_SHRINKAGE_K,
+    DEFAULT_PLAYER_FEATURE_WINDOWS,
+    EWM_SPAN,
+    POSITION_TRY_RATES,
+    position_from_jersey,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -134,6 +140,27 @@ def _rolling_feature(series: pd.Series, window: int, *, min_periods: int = 1) ->
     return series.shift(1).rolling(window=window, min_periods=min_periods).mean()
 
 
+def _ewm_feature(series: pd.Series, span: int) -> pd.Series:
+    """Compute a shifted exponential weighted moving average.
+
+    Recent values are weighted more heavily than older ones,
+    capturing form changes faster than simple rolling averages.
+
+    Parameters
+    ----------
+    series : pd.Series
+        Raw metric series (one value per match, ordered chronologically).
+    span : int
+        EWM span (controls decay rate).
+
+    Returns
+    -------
+    pd.Series
+        Shifted EWM values. First observation is NaN (no prior data).
+    """
+    return series.shift(1).ewm(span=span, min_periods=1).mean()
+
+
 def compute_player_features(
     connection: Connection,
     year: int | str,
@@ -192,6 +219,26 @@ def compute_player_features(
             lambda s: _rolling_feature((s > 0).astype(float), window)
         )
 
+    # EWM (exponential weighted moving average) features for top SHAP metrics
+    _EWM_METRICS = ("tries", "line_breaks", "tackle_breaks", "run_metres")
+    for metric in _EWM_METRICS:
+        if metric not in stats.columns:
+            continue
+        features[f"ewm_{metric}_{EWM_SPAN}"] = grouped[metric].transform(
+            lambda s: _ewm_feature(s, EWM_SPAN)
+        )
+
+    # Season-to-date expanding window features
+    # Mirror prior_season_* features so GBM can compare current vs historical form
+    _EXPANDING_METRICS = ("tries", "line_breaks", "tackle_breaks", "run_metres", "try_assists")
+    for metric in _EXPANDING_METRICS:
+        features[f"season_avg_{metric}"] = grouped[metric].transform(
+            lambda s: s.shift(1).expanding(min_periods=1).mean()
+        )
+    features["season_try_rate"] = grouped["tries"].transform(
+        lambda s: (s > 0).astype(float).shift(1).expanding(min_periods=1).mean()
+    )
+
     if feature_config.include_recent_form:
         features["recent_form_tries"] = grouped["tries"].transform(
             lambda s: _rolling_feature(s, 3)
@@ -210,6 +257,25 @@ def compute_player_features(
     )
     features["position_group"] = features["position_code"].apply(_position_group_from_code)
     features["is_starter"] = (stats["jumper_number"] <= 13).astype(int)
+
+    # Bayesian shrinkage try rate (computed after position_code and matches_played)
+    # Formula: bayes_rate = (n * player_rate + k * position_prior) / (n + k)
+    # Position prior from POSITION_TRY_RATES (training data averages, no leakage).
+    features["bayesian_position_prior"] = features["position_code"].map(
+        POSITION_TRY_RATES
+    ).fillna(POSITION_TRY_RATES.get("RES", 0.04))
+
+    n_matches = features["matches_played"].clip(lower=0)
+    # NaN rolling_try_rate means no prior data → treat as 0 for Bayesian weighting
+    player_rate = features.get(
+        "rolling_try_rate_5", pd.Series(0.0, index=features.index)
+    ).fillna(0.0)
+    k = BAYESIAN_SHRINKAGE_K
+    features["bayesian_try_rate"] = (
+        (n_matches * player_rate + k * features["bayesian_position_prior"])
+        / (n_matches + k)
+    )
+    features["bayesian_confidence"] = n_matches / (n_matches + k)
 
     if feature_config.fillna_value is not None:
         features = features.fillna(feature_config.fillna_value)

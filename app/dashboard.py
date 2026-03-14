@@ -140,7 +140,12 @@ def _run_pipeline(season: int, round_number: int, bankroll: float,
 
 def _merge_form_stats(predictions: pd.DataFrame, season: int,
                       round_number: int) -> pd.DataFrame:
-    """Merge rolling form stats from the feature store."""
+    """Merge rolling form stats from the feature store.
+
+    First attempts a (match_id, player_id) merge. If that produces all NaN
+    for the form columns (prediction-round match_ids not in the feature store),
+    falls back to using each player's most recent historical row.
+    """
     if predictions.empty or "match_id" not in predictions.columns:
         return predictions
 
@@ -152,13 +157,37 @@ def _merge_form_stats(predictions: pd.DataFrame, season: int,
     if not path.exists():
         return predictions
 
-    fs = pd.read_parquet(path, columns=["match_id", "player_id"] + form_cols)
+    read_cols = ["match_id", "player_id", "round_number"] + form_cols
+    # Only read columns that actually exist in the parquet
+    try:
+        import pyarrow.parquet as pq
+        available = set(pq.read_schema(path).names)
+        read_cols = [c for c in read_cols if c in available]
+    except Exception:
+        pass
+    fs = pd.read_parquet(path, columns=read_cols)
+
     merge_keys = ["match_id", "player_id"]
-    # Only merge columns not already present
-    new_cols = [c for c in form_cols if c not in predictions.columns]
+    new_cols = [c for c in form_cols if c not in predictions.columns and c in fs.columns]
     if not new_cols:
         return predictions
-    return predictions.merge(fs[merge_keys + new_cols], on=merge_keys, how="left")
+
+    result = predictions.merge(fs[merge_keys + new_cols], on=merge_keys, how="left")
+
+    # Fallback: if the match_id merge produced all NaN, use latest row per player
+    if result[new_cols].isna().all(axis=None) and "round_number" in fs.columns:
+        LOGGER.info("Form stats merge by (match_id, player_id) yielded all NaN — "
+                     "falling back to latest row per player_id")
+        latest = (
+            fs.sort_values("round_number")
+            .drop_duplicates(subset=["player_id"], keep="last")
+        )
+        for col in new_cols:
+            if col in latest.columns:
+                fill_map = latest.set_index("player_id")[col]
+                result[col] = result["player_id"].map(fill_map)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -300,10 +329,16 @@ def _build_display_df(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[int, str]]:
             "Usual Pos": usual_pos,
             "XIII": "Y" if r.get("is_starter") else "",
             "Model %": _format_pct(r.get("model_prob")),
+            "Mkt %": _format_pct(r.get("best_implied_prob")),
+            "Edge": _format_pct(r.get("edge")),
+            "Stake": _format_stake(r.get("stake")),
             "Best Odds": _format_odds(r.get("best_odds")),
             "Best Book": BOOKMAKER_DISPLAY_NAMES.get(
                 str(r.get("best_bookmaker", "")), str(r.get("best_bookmaker", "-"))
             ) if pd.notna(r.get("best_bookmaker")) else "-",
+            "Tries(3m)": _format_stat(r.get("rolling_tries_3")),
+            "LB(3m)": _format_stat(r.get("rolling_line_breaks_3")),
+            "TB(3m)": _format_stat(r.get("rolling_attack_tackle_breaks_3")),
         }
 
         # Per-bookmaker odds columns — track which has the highest value
@@ -320,12 +355,6 @@ def _build_display_df(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[int, str]]:
         if best_header is not None and best_val > 0:
             best_col_per_row[idx] = best_header
 
-        row["Mkt %"] = _format_pct(r.get("best_implied_prob"))
-        row["Edge"] = _format_pct(r.get("edge"))
-        row["Tries(3m)"] = _format_stat(r.get("rolling_tries_3"))
-        row["LB(3m)"] = _format_stat(r.get("rolling_line_breaks_3"))
-        row["TB(3m)"] = _format_stat(r.get("rolling_attack_tackle_breaks_3"))
-        row["Stake"] = _format_stake(r.get("stake"))
         rows.append(row)
 
     return pd.DataFrame(rows), best_col_per_row
@@ -434,6 +463,13 @@ def main() -> None:
     col3.metric("Positive Edge", n_positive_edge)
     col4.metric("Total Stake", f"${total_staked:,.0f}")
 
+    # Projected lineup warning
+    if "is_projected_lineup" in predictions.columns and predictions["is_projected_lineup"].any():
+        st.warning(
+            "Team lists not yet published — showing projected lineup from previous round. "
+            "Re-run the pipeline after official team lists are announced for accurate predictions."
+        )
+
     # --- Recommended Bets ---
     if bet_card and bet_card.bets:
         with st.expander(f"Recommended Bets ({len(bet_card.bets)} bets)", expanded=True):
@@ -449,8 +485,31 @@ def main() -> None:
                 f"({bet_card.exposure_pct:.1f}% of ${bankroll:,.0f} bankroll) "
                 f"across {bet_card.n_matches_bet} matches"
             )
+
+            # Warn if flat stakes were reduced by exposure cap
+            if flat_stake and len(bet_card.bets) > 0:
+                actual_avg = bet_card.total_staked / len(bet_card.bets)
+                if actual_avg < flat_stake * 0.95:  # >5% reduction
+                    st.warning(
+                        f"Flat stakes reduced from ${flat_stake:.0f} to "
+                        f"~${actual_avg:.0f} per bet due to exposure cap "
+                        f"({bet_card.exposure_pct:.1f}% of bankroll)"
+                    )
     else:
         st.info("No bets meet the current edge threshold.")
+
+    # Early-season form stats note
+    if "season" in predictions.columns:
+        pred_season = predictions["season"].iloc[0]
+    else:
+        pred_season = pipeline_key[0]
+    pred_round = pipeline_key[1]
+    if pred_round is not None and pred_round <= 4:
+        n_prior = max(0, pred_round - 1)
+        st.info(
+            f"Form stats (Tries/LB/TB 3m) based on {n_prior} match{'es' if n_prior != 1 else ''} "
+            f"of {pred_season} data. Model relies on cross-season priors until more rounds are played."
+        )
 
     # --- Per-match tables ---
     st.subheader("Per-Match Predictions")

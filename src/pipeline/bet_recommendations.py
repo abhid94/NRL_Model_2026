@@ -14,6 +14,9 @@ import numpy as np
 import pandas as pd
 
 from src.config import (
+    BOOKMAKER_ROTATION_MAX_BETS,
+    BOOKMAKER_ROTATION_MAX_ODDS_GAP,
+    BOOKMAKER_ROTATION_WINDOW,
     DEFAULT_INITIAL_BANKROLL,
     DEFAULT_KELLY_FRACTION,
     ELIGIBLE_POSITION_CODES,
@@ -171,7 +174,7 @@ def generate_bet_card(
         # Kelly staking (fallback if flat_stake not provided)
         df["stake"] = df.apply(
             lambda row: _kelly_stake(
-                row["edge"], row["betfair_closing_odds"],
+                row["edge"], row["_display_odds"],
                 bankroll, kelly_fraction,
             ),
             axis=1,
@@ -205,22 +208,43 @@ def generate_bet_card(
     if len(df) > max_bets_per_round:
         df = df.head(max_bets_per_round)
 
-    # Build bet records
+    # Build bet records with bookmaker rotation
     bets = []
+    bookmaker_counts = _get_recent_bookmaker_counts(season, round_number)
+
     for _, row in df.iterrows():
+        # Determine bookmaker (with rotation if overexposed)
+        bookmaker = None
+        display_odds = float(row["_display_odds"])
+        if "best_bookmaker" in row.index and pd.notna(row.get("best_bookmaker")):
+            bookmaker = str(row["best_bookmaker"])
+            # Check rotation: if this bookmaker has too many recent bets, try alternatives
+            if bookmaker_counts.get(bookmaker, 0) >= BOOKMAKER_ROTATION_MAX_BETS:
+                alt_bk, alt_odds = _find_rotation_alternative(row, bookmaker, df.columns)
+                if alt_bk is not None and alt_odds is not None:
+                    odds_gap = abs(alt_odds - display_odds) / display_odds
+                    if odds_gap <= BOOKMAKER_ROTATION_MAX_ODDS_GAP:
+                        LOGGER.info(
+                            "Rotating from %s (count=%d) to %s for player %s (odds gap=%.1f%%)",
+                            bookmaker, bookmaker_counts[bookmaker], alt_bk,
+                            row.get("player_id"), odds_gap * 100,
+                        )
+                        bookmaker = alt_bk
+                        display_odds = alt_odds
+
         bet: dict[str, Any] = {
             "match_id": int(row["match_id"]),
             "player_id": int(row["player_id"]),
             "position_code": str(row.get("position_code", "")),
             "model_prob": round(float(row["model_prob"]), 4),
             "implied_prob": round(float(row.get("best_implied_prob", row["betfair_implied_prob"])), 4),
-            "odds": round(float(row["_display_odds"]), 2),
+            "odds": round(display_odds, 2),
             "edge": round(float(row["edge"]), 4),
             "stake": round(float(row["stake"]), 0),
         }
-        # Add bookmaker info when available
-        if "best_bookmaker" in row.index and pd.notna(row.get("best_bookmaker")):
-            bet["bookmaker"] = str(row["best_bookmaker"])
+        if bookmaker is not None:
+            bet["bookmaker"] = bookmaker
+            bookmaker_counts[bookmaker] = bookmaker_counts.get(bookmaker, 0) + 1
         bets.append(bet)
 
     total_staked = sum(b["stake"] for b in bets)
@@ -266,3 +290,83 @@ def _kelly_stake(
         return 0.0
     kelly = kelly_fraction * edge / (odds - 1)
     return kelly * bankroll
+
+
+def _get_recent_bookmaker_counts(
+    season: int,
+    round_number: int,
+) -> dict[str, int]:
+    """Get count of bets placed per bookmaker in recent rounds.
+
+    Reads from prediction logs to determine bookmaker usage.
+
+    Parameters
+    ----------
+    season : int
+        Current season.
+    round_number : int
+        Current round.
+
+    Returns
+    -------
+    dict[str, int]
+        Bookmaker key -> number of bets in last BOOKMAKER_ROTATION_WINDOW rounds.
+    """
+    from src.config import BACKTEST_RESULTS_DIR
+
+    counts: dict[str, int] = {}
+    log_dir = BACKTEST_RESULTS_DIR / "prediction_logs"
+    if not log_dir.exists():
+        return counts
+
+    start_round = max(1, round_number - BOOKMAKER_ROTATION_WINDOW)
+    for rnd in range(start_round, round_number):
+        pattern = f"bets_{season}_R{rnd:02d}_*.csv"
+        for f in log_dir.glob(pattern):
+            try:
+                df = pd.read_csv(f)
+                if "bookmaker" in df.columns:
+                    for bk in df["bookmaker"].dropna():
+                        counts[str(bk)] = counts.get(str(bk), 0) + 1
+            except Exception:
+                continue
+
+    return counts
+
+
+def _find_rotation_alternative(
+    row: pd.Series,
+    current_bookmaker: str,
+    columns: pd.Index,
+) -> tuple[str | None, float | None]:
+    """Find an alternative bookmaker for rotation.
+
+    Looks at per-bookmaker odds columns (odds_<bookmaker>) to find
+    the second-best price from a different bookmaker.
+
+    Parameters
+    ----------
+    row : pd.Series
+        Row from predictions DataFrame.
+    current_bookmaker : str
+        The bookmaker to rotate away from.
+    columns : pd.Index
+        Available column names.
+
+    Returns
+    -------
+    tuple[str | None, float | None]
+        (alternative_bookmaker, alternative_odds) or (None, None).
+    """
+    odds_cols = [c for c in columns if c.startswith("odds_") and c != f"odds_{current_bookmaker}" and c != "odds_band"]
+    best_alt: tuple[str | None, float | None] = (None, None)
+    best_odds = 0.0
+
+    for col in odds_cols:
+        val = row.get(col)
+        if pd.notna(val) and float(val) > best_odds:
+            best_odds = float(val)
+            bk_name = col.replace("odds_", "")
+            best_alt = (bk_name, best_odds)
+
+    return best_alt

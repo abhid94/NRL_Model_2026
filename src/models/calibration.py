@@ -35,6 +35,9 @@ class CalibratedModel(BaseModel):
         ``"isotonic"`` for non-parametric or ``"sigmoid"`` for Platt scaling.
     cal_rounds : int
         Number of most-recent training rounds to hold out for calibration.
+    scoring_env_adjust : bool
+        If True, apply post-calibration scaling when observed try rate
+        in recent rounds diverges from calibration-period rate by >2pp.
     """
 
     def __init__(
@@ -42,15 +45,18 @@ class CalibratedModel(BaseModel):
         base_model: BaseModel,
         method: str = "isotonic",
         cal_rounds: int = 5,
+        scoring_env_adjust: bool = True,
     ) -> None:
         if method not in ("isotonic", "sigmoid"):
             raise ValueError(f"method must be 'isotonic' or 'sigmoid', got '{method}'")
         self._base_model = base_model
         self._method = method
         self._cal_rounds = cal_rounds
+        self._scoring_env_adjust = scoring_env_adjust
         self._calibrator: IsotonicRegression | LogisticRegression | None = None
+        self._cal_try_rate: float | None = None  # try rate during calibration period
 
-    def fit(self, X: pd.DataFrame, y: np.ndarray) -> None:
+    def fit(self, X: pd.DataFrame, y: np.ndarray, **kwargs) -> None:
         """Fit base model + calibrator with temporal split.
 
         Parameters
@@ -59,8 +65,13 @@ class CalibratedModel(BaseModel):
             Training data. Must contain ``round_number`` column.
         y : array-like
             Binary target (0/1).
+        **kwargs
+            Forwarded to base model fit (e.g. sample_weight).
         """
         y = np.asarray(y, dtype=float)
+
+        # Split sample_weight if provided
+        sample_weight = kwargs.get("sample_weight")
 
         # Temporal split: hold out last cal_rounds for calibration
         if "round_number" in X.columns:
@@ -83,15 +94,20 @@ class CalibratedModel(BaseModel):
         X_train, y_train = X[train_mask], y[train_mask.values]
         X_cal, y_cal = X[cal_mask], y[cal_mask.values]
 
+        # Split sample_weight to match train/cal split
+        train_kwargs = dict(kwargs)
+        if sample_weight is not None:
+            train_kwargs["sample_weight"] = np.asarray(sample_weight)[train_mask.values]
+
         if len(X_train) == 0 or len(X_cal) == 0:
             # Fallback: fit on all data, no calibration
             LOGGER.warning("Not enough data for calibration split; fitting without calibration")
-            self._base_model.fit(X, y)
+            self._base_model.fit(X, y, **kwargs)
             self._calibrator = None
             return
 
         # 1. Fit base model on training portion
-        self._base_model.fit(X_train, y_train)
+        self._base_model.fit(X_train, y_train, **train_kwargs)
 
         # 2. Get raw predictions on calibration set
         raw_probs = self._base_model.predict_proba(X_cal)
@@ -107,13 +123,16 @@ class CalibratedModel(BaseModel):
             self._calibrator = LogisticRegression(C=1e10, solver="lbfgs", max_iter=1000)
             self._calibrator.fit(raw_probs.reshape(-1, 1), y_cal)
 
+        # Store calibration-period try rate for scoring environment adjustment
+        self._cal_try_rate = float(y_cal.mean())
+
         LOGGER.info(
-            "CalibratedModel fitted: %d train, %d cal, method=%s",
-            len(X_train), len(X_cal), self._method,
+            "CalibratedModel fitted: %d train, %d cal, method=%s, cal_try_rate=%.3f",
+            len(X_train), len(X_cal), self._method, self._cal_try_rate,
         )
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        """Return calibrated P(ATS).
+        """Return calibrated P(ATS), with optional scoring environment adjustment.
 
         Parameters
         ----------
@@ -130,9 +149,26 @@ class CalibratedModel(BaseModel):
             return raw_probs
 
         if self._method == "isotonic":
-            return self._calibrator.predict(raw_probs)
+            calibrated = self._calibrator.predict(raw_probs)
         else:
-            return self._calibrator.predict_proba(raw_probs.reshape(-1, 1))[:, 1]
+            calibrated = self._calibrator.predict_proba(raw_probs.reshape(-1, 1))[:, 1]
+
+        # Scoring environment adjustment: if observed try rate in data
+        # diverges from calibration-period rate by >2pp, apply multiplicative correction
+        if self._scoring_env_adjust and self._cal_try_rate is not None:
+            env_ratio = X.get("scoring_environment_ratio")
+            if env_ratio is not None and not env_ratio.isna().all():
+                mean_ratio = float(env_ratio.dropna().mean())
+                # If scoring environment is higher (e.g., 1.075 for 2026),
+                # scale probabilities up proportionally
+                if abs(mean_ratio - 1.0) > 0.02:
+                    calibrated = np.clip(calibrated * mean_ratio, 0.0, 1.0)
+                    LOGGER.info(
+                        "Scoring environment adjustment: ratio=%.3f, scaling calibrated probs",
+                        mean_ratio,
+                    )
+
+        return calibrated
 
     def feature_names(self) -> list[str]:
         """Return feature names from the base model."""
@@ -196,9 +232,12 @@ class PositionCalibratedModel(BaseModel):
             return cal.predict(raw_probs)
         return cal.predict_proba(raw_probs.reshape(-1, 1))[:, 1]
 
-    def fit(self, X: pd.DataFrame, y: np.ndarray) -> None:
+    def fit(self, X: pd.DataFrame, y: np.ndarray, **kwargs) -> None:
         """Fit base model + per-position calibrators."""
         y = np.asarray(y, dtype=float)
+
+        # Split sample_weight if provided
+        sample_weight = kwargs.get("sample_weight")
 
         # Temporal split
         if "round_number" in X.columns:
@@ -219,13 +258,18 @@ class PositionCalibratedModel(BaseModel):
         X_train, y_train = X[train_mask], y[train_mask.values]
         X_cal, y_cal = X[cal_mask], y[cal_mask.values]
 
+        # Split sample_weight to match train/cal split
+        train_kwargs = dict(kwargs)
+        if sample_weight is not None:
+            train_kwargs["sample_weight"] = np.asarray(sample_weight)[train_mask.values]
+
         if len(X_train) == 0 or len(X_cal) == 0:
             LOGGER.warning("Not enough data for calibration; fitting without calibration")
-            self._base_model.fit(X, y)
+            self._base_model.fit(X, y, **kwargs)
             return
 
         # 1. Fit base model
-        self._base_model.fit(X_train, y_train)
+        self._base_model.fit(X_train, y_train, **train_kwargs)
 
         # 2. Get raw predictions on calibration set
         raw_probs = self._base_model.predict_proba(X_cal)

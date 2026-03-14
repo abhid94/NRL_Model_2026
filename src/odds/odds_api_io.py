@@ -699,6 +699,63 @@ def _parse_price(val: Any) -> float | None:
         return None
 
 
+def parse_h2h_odds(
+    records: list[dict[str, Any]],
+) -> pd.DataFrame:
+    """Extract h2h implied win probability and handicap from match odds.
+
+    Parameters
+    ----------
+    records : list[dict]
+        Output from ``parse_match_odds()`` or ``fetch_nrl_match_odds()``.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per match with: match_id, bet365_home_odds,
+        bet365_away_odds, bet365_implied_home_win_prob,
+        bet365_handicap_line.
+    """
+    import pandas as pd
+
+    if not records:
+        return pd.DataFrame(columns=[
+            "match_id", "bet365_home_odds", "bet365_away_odds",
+            "bet365_implied_home_win_prob", "bet365_handicap_line",
+        ])
+
+    df = pd.DataFrame(records)
+    results = []
+
+    for mid, group in df.groupby("match_id"):
+        row: dict[str, Any] = {"match_id": mid}
+
+        # H2H
+        h2h = group[group["market"] == "Game Betting 2-Way"]
+        if not h2h.empty:
+            home_odds = h2h["home_odds"].dropna()
+            away_odds = h2h["away_odds"].dropna()
+            if not home_odds.empty and not away_odds.empty:
+                ho = home_odds.iloc[0]
+                ao = away_odds.iloc[0]
+                row["bet365_home_odds"] = ho
+                row["bet365_away_odds"] = ao
+                if ho > 1 and ao > 1:
+                    overround = (1.0 / ho) + (1.0 / ao)
+                    row["bet365_implied_home_win_prob"] = (1.0 / ho) / overround
+
+        # Handicap — take the first line (usually the main line)
+        hcap = group[group["market"] == "Handicap 2-Way"]
+        if not hcap.empty and "handicap" in hcap.columns:
+            hdp = hcap["handicap"].dropna()
+            if not hdp.empty:
+                row["bet365_handicap_line"] = hdp.iloc[0]
+
+        results.append(row)
+
+    return pd.DataFrame(results)
+
+
 def fetch_nrl_match_odds(
     conn: sqlite3.Connection,
     season: int,

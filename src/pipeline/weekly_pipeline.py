@@ -20,13 +20,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from src.config import (
     BACKTEST_RESULTS_DIR,
+    CLV_NEGATIVE_MULTIPLIER,
+    CLV_NEGATIVE_ROUNDS_THRESHOLD,
+    CLV_TABLE_NAME,
     DB_PATH,
     DEFAULT_INITIAL_BANKROLL,
     DEFAULT_KELLY_FRACTION,
+    EARLY_SEASON_KELLY_MULTIPLIER,
+    EARLY_SEASON_ROUNDS,
     FEATURE_STORE_DIR,
     MODEL_ARTIFACTS_DIR,
 )
@@ -95,7 +101,7 @@ def get_default_model() -> BaseModel:
             reg_lambda=3.0,
             min_child_samples=80,
         ),
-        method="isotonic",
+        method="sigmoid",
         cal_rounds=5,
     )
 
@@ -109,6 +115,7 @@ def run_weekly_pipeline(
     rebuild_features: bool = True,
     flat_stake: float | None = None,
     pull_odds: bool = True,
+    exclude_player_ids: set[int] | None = None,
 ) -> dict[str, Any]:
     """Run the full weekly pipeline.
 
@@ -131,6 +138,8 @@ def run_weekly_pipeline(
     pull_odds : bool
         If True, ingest latest team lists and odds from external APIs.
         If False, skip ingestion and use whatever is already in the DB.
+    exclude_player_ids : set[int], optional
+        Player IDs to exclude from predictions (e.g. late withdrawals).
 
     Returns
     -------
@@ -193,6 +202,17 @@ def run_weekly_pipeline(
     else:
         LOGGER.info("Steps 0/0.5: Skipping odds ingestion (pull_odds=False)")
 
+    # Step 0.75: Compute per-bookmaker margin corrections from actual data
+    LOGGER.info("Step 0.75: Computing bookmaker margin corrections")
+    try:
+        from src.odds.bookmaker import compute_bookmaker_margins
+        margin_conn = get_connection(DB_PATH)
+        margins = compute_bookmaker_margins(margin_conn, season)
+        margin_conn.close()
+        LOGGER.info("  Margin corrections: %s", margins)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Margin computation failed (non-fatal, using defaults): %s", exc)
+
     # Step 1: Build/load feature stores
     LOGGER.info("Step 1: Loading feature stores")
     conn = get_connection(DB_PATH)
@@ -229,10 +249,11 @@ def run_weekly_pipeline(
     training_store = pd.concat(training_dfs, ignore_index=True)
     LOGGER.info("Training data: %d rows across seasons %s", len(training_store), training_seasons)
 
-    # Step 2: Fit model
+    # Step 2: Fit model (with recency weights for multi-season training)
     LOGGER.info("Step 2: Fitting model on training data")
     y_train = training_store["scored_try"].values
-    model.fit(training_store, y_train)
+    sample_weight = compute_recency_weights(training_store, season)
+    model.fit(training_store, y_train, sample_weight=sample_weight)
     LOGGER.info("  Model fitted: %s", type(model).__name__)
 
     # Step 3: Build features and predict for target round
@@ -244,26 +265,44 @@ def run_weekly_pipeline(
     if "season" not in round_store.columns:
         round_store["season"] = season
 
-    predictions = predict_round(model, round_store, season, round_number, conn=conn)
+    predictions = predict_round(
+        model, round_store, season, round_number, conn=conn,
+        exclude_player_ids=exclude_player_ids,
+    )
     LOGGER.info("  Predictions: %d players", len(predictions))
 
     conn.close()
 
-    # Step 4: Generate bet recommendations
-    LOGGER.info("Step 4: Generating bet recommendations")
-    bet_card = generate_bet_card(
-        predictions,
-        bankroll=bankroll,
-        flat_stake=flat_stake,
-    )
+    # Step 4: Drawdown check (BEFORE bet generation — fixes wiring bug)
+    drawdown_status = check_drawdown(bankroll)
+    LOGGER.info("Step 4: Drawdown status: %s", drawdown_status["status"])
+
+    if drawdown_status["status"] in ("HALT", "STOP"):
+        LOGGER.warning(drawdown_status["message"])
+        bet_card = BetCard(
+            season=season, round_number=round_number, bankroll=bankroll,
+            bets=[], total_staked=0.0, exposure_pct=0.0, n_matches_bet=0,
+        )
+    else:
+        # Step 5: Compute adaptive Kelly fraction and generate bets
+        LOGGER.info("Step 5: Generating bet recommendations")
+        adaptive_fraction = compute_adaptive_kelly(
+            round_number=round_number,
+            drawdown_adjustment=drawdown_status["kelly_adjustment"],
+            bankroll=bankroll,
+            season=season,
+        )
+        LOGGER.info("  Adaptive Kelly fraction: %.3f (base=%.2f)", adaptive_fraction, DEFAULT_KELLY_FRACTION)
+        bet_card = generate_bet_card(
+            predictions,
+            bankroll=bankroll,
+            kelly_fraction=adaptive_fraction,
+            flat_stake=flat_stake,
+        )
     LOGGER.info("  Bet card: %d bets, $%.0f staked", len(bet_card.bets), bet_card.total_staked)
 
-    # Step 5: Drawdown check
-    drawdown_status = check_drawdown(bankroll)
-    LOGGER.info("Step 5: Drawdown status: %s", drawdown_status["status"])
-
     # Step 6: Log predictions
-    LOGGER.info("Step 6: Logging predictions")
+    LOGGER.info("Step 6: Logging predictions and CLV data")
     log_entry = log_predictions(
         season, round_number, predictions, bet_card, bankroll,
     )
@@ -279,6 +318,234 @@ def run_weekly_pipeline(
         "log_entry": log_entry,
         "elapsed_seconds": elapsed,
     }
+
+
+def compute_recency_weights(
+    training_store: pd.DataFrame,
+    current_season: int,
+) -> "np.ndarray":
+    """Compute per-sample recency weights for training data.
+
+    More recent seasons get higher weights:
+    - Current season: 1.0
+    - Previous season: 0.8
+    - Two seasons ago: 0.5
+    - Older: 0.3
+
+    Parameters
+    ----------
+    training_store : pd.DataFrame
+        Must contain a ``season`` column.
+    current_season : int
+        The season being predicted.
+
+    Returns
+    -------
+    np.ndarray
+        Weight per training sample.
+    """
+    weight_map = {
+        0: 1.0,   # current season
+        1: 0.8,   # previous season
+        2: 0.5,   # two seasons ago
+    }
+    default_weight = 0.3
+
+    seasons = training_store["season"].values
+    age = current_season - seasons
+    weights = np.array([weight_map.get(int(a), default_weight) for a in age])
+
+    unique_weights = {int(s): float(w) for s, w in zip(
+        np.unique(seasons), [weight_map.get(current_season - int(s), default_weight) for s in np.unique(seasons)]
+    )}
+    LOGGER.info("Recency weights: %s", unique_weights)
+
+    return weights
+
+
+def compute_adaptive_kelly(
+    round_number: int,
+    drawdown_adjustment: float = 1.0,
+    bankroll: float = DEFAULT_INITIAL_BANKROLL,
+    season: int = 2026,
+) -> float:
+    """Compute adaptive Kelly fraction based on context.
+
+    Combines multiple adjustment factors:
+    - Early-season (rounds 1-4): 0.5x (thin data)
+    - Drawdown: from check_drawdown() kelly_adjustment
+    - CLV trend: if negative CLV for 3+ consecutive rounds, 0.6x
+
+    Parameters
+    ----------
+    round_number : int
+        Current round number.
+    drawdown_adjustment : float
+        Kelly multiplier from drawdown check (1.0 = normal, 0.6 = warning).
+    bankroll : float
+        Current bankroll.
+    season : int
+        Current season.
+
+    Returns
+    -------
+    float
+        Adjusted Kelly fraction.
+    """
+    fraction = DEFAULT_KELLY_FRACTION
+
+    # Early-season reduction
+    if round_number <= EARLY_SEASON_ROUNDS:
+        fraction *= EARLY_SEASON_KELLY_MULTIPLIER
+        LOGGER.info("  Early season (round %d <= %d): Kelly *= %.1f",
+                     round_number, EARLY_SEASON_ROUNDS, EARLY_SEASON_KELLY_MULTIPLIER)
+
+    # Drawdown adjustment
+    if drawdown_adjustment < 1.0:
+        fraction *= drawdown_adjustment
+        LOGGER.info("  Drawdown adjustment: Kelly *= %.1f", drawdown_adjustment)
+
+    # CLV trend adjustment
+    clv_multiplier = _get_clv_kelly_multiplier(season)
+    if clv_multiplier < 1.0:
+        fraction *= clv_multiplier
+        LOGGER.info("  CLV trend negative: Kelly *= %.1f", clv_multiplier)
+
+    return fraction
+
+
+def _get_clv_kelly_multiplier(season: int) -> float:
+    """Check recent CLV trend and return Kelly multiplier.
+
+    If CLV has been negative for CLV_NEGATIVE_ROUNDS_THRESHOLD or more
+    consecutive rounds, return CLV_NEGATIVE_MULTIPLIER. Otherwise 1.0.
+
+    Parameters
+    ----------
+    season : int
+        Current season.
+
+    Returns
+    -------
+    float
+        1.0 (normal) or CLV_NEGATIVE_MULTIPLIER.
+    """
+    try:
+        conn = get_connection(DB_PATH)
+        if not table_exists(conn, CLV_TABLE_NAME):
+            conn.close()
+            return 1.0
+
+        clv_df = pd.read_sql_query(
+            f"""
+            SELECT round_number, AVG(clv) AS avg_clv
+            FROM {CLV_TABLE_NAME}
+            WHERE season = ?
+            GROUP BY round_number
+            ORDER BY round_number DESC
+            LIMIT ?
+            """,
+            conn,
+            params=(season, CLV_NEGATIVE_ROUNDS_THRESHOLD),
+        )
+        conn.close()
+
+        if len(clv_df) < CLV_NEGATIVE_ROUNDS_THRESHOLD:
+            return 1.0
+
+        # Check if all recent rounds have negative CLV
+        if (clv_df["avg_clv"] < 0).all():
+            return CLV_NEGATIVE_MULTIPLIER
+
+        return 1.0
+    except Exception:
+        return 1.0
+
+
+def record_clv(
+    season: int,
+    round_number: int,
+    bet_records: list[dict],
+    conn: "sqlite3.Connection | None" = None,
+) -> int:
+    """Record CLV data after a round completes.
+
+    Compares model probability at bet time vs closing line probability.
+
+    Parameters
+    ----------
+    season : int
+        Season year.
+    round_number : int
+        Round number.
+    bet_records : list[dict]
+        Each dict must have: player_id, match_id, model_prob, closing_prob.
+        Optionally: bookmaker.
+    conn : sqlite3.Connection, optional
+        Database connection. Opens new one if None.
+
+    Returns
+    -------
+    int
+        Number of CLV records inserted.
+    """
+    import sqlite3 as _sqlite3
+
+    close_conn = False
+    if conn is None:
+        conn = get_connection(DB_PATH)
+        close_conn = True
+
+    try:
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {CLV_TABLE_NAME} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                season INTEGER NOT NULL,
+                round_number INTEGER NOT NULL,
+                match_id INTEGER NOT NULL,
+                player_id INTEGER NOT NULL,
+                model_prob REAL,
+                closing_prob REAL,
+                clv REAL,
+                bookmaker TEXT,
+                timestamp TEXT,
+                UNIQUE(season, round_number, match_id, player_id)
+            )
+        """)
+        conn.commit()
+
+        timestamp = datetime.now().isoformat()
+        n_inserted = 0
+        for rec in bet_records:
+            model_prob = rec.get("model_prob")
+            closing_prob = rec.get("closing_prob")
+            clv = (model_prob - closing_prob) if (model_prob is not None and closing_prob is not None) else None
+
+            try:
+                conn.execute(
+                    f"""
+                    INSERT OR REPLACE INTO {CLV_TABLE_NAME}
+                        (season, round_number, match_id, player_id,
+                         model_prob, closing_prob, clv, bookmaker, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        season, round_number, rec["match_id"], rec["player_id"],
+                        model_prob, closing_prob, clv,
+                        rec.get("bookmaker", ""), timestamp,
+                    ),
+                )
+                n_inserted += 1
+            except _sqlite3.Error as exc:
+                LOGGER.warning("Failed to insert CLV record: %s", exc)
+
+        conn.commit()
+        LOGGER.info("Recorded %d CLV entries for season %d round %d", n_inserted, season, round_number)
+        return n_inserted
+
+    finally:
+        if close_conn:
+            conn.close()
 
 
 def check_drawdown(

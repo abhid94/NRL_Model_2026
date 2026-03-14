@@ -18,7 +18,12 @@ from typing import Any
 
 import pandas as pd
 
-from src.config import BOOKMAKER_DISPLAY_NAMES, BOOKMAKER_DISPLAY_NAMES_IO, DB_PATH
+from src.config import (
+    BOOKMAKER_DISPLAY_NAMES,
+    BOOKMAKER_DISPLAY_NAMES_IO,
+    BOOKMAKER_MARGIN_CORRECTIONS,
+    DB_PATH,
+)
 from src.db import get_connection
 from src.ingestion.player_matcher import get_known_players, match_player_name
 from src.odds.odds_api import fetch_round_odds
@@ -420,6 +425,92 @@ def ingest_bet365_odds(
     finally:
         if close_conn:
             conn.close()
+
+
+def compute_bookmaker_margins(
+    conn: sqlite3.Connection,
+    year: int,
+    snapshot_type: str = "closing",
+) -> dict[str, float]:
+    """Compute actual margin correction per bookmaker from stored odds.
+
+    For each bookmaker, computes the average overround across all matches:
+    ``overround = sum(1/odds for all players in a match's ATS market)``
+    ``correction = 1 / overround``
+
+    Updates the global ``BOOKMAKER_MARGIN_CORRECTIONS`` dict in-place and
+    returns it.
+
+    Parameters
+    ----------
+    conn : sqlite3.Connection
+        Database connection.
+    year : int
+        Season year.
+    snapshot_type : str
+        Snapshot type filter.
+
+    Returns
+    -------
+    dict[str, float]
+        Bookmaker key -> margin correction factor.
+    """
+    table = f"bookmaker_odds_{year}"
+    try:
+        df = pd.read_sql_query(
+            f"""
+            SELECT match_id, bookmaker, SUM(implied_probability) AS overround,
+                   COUNT(*) AS n_players
+            FROM {table}
+            WHERE snapshot_type = ? AND is_available = 1
+            GROUP BY match_id, bookmaker
+            HAVING n_players >= 10
+            """,
+            conn,
+            params=(snapshot_type,),
+        )
+    except Exception:  # noqa: BLE001
+        LOGGER.info("Cannot compute margins: %s not found", table)
+        return dict(BOOKMAKER_MARGIN_CORRECTIONS)
+
+    if df.empty:
+        return dict(BOOKMAKER_MARGIN_CORRECTIONS)
+
+    # Average correction per bookmaker
+    corrections: dict[str, float] = {}
+    for bk, group in df.groupby("bookmaker"):
+        avg_overround = group["overround"].mean()
+        if avg_overround > 0:
+            correction = 1.0 / avg_overround
+            corrections[str(bk)] = round(correction, 4)
+            LOGGER.info(
+                "Bookmaker %s: avg overround=%.2f, correction=%.4f (%d matches)",
+                bk, avg_overround, correction, len(group),
+            )
+
+    # Update global corrections
+    for bk, corr in corrections.items():
+        BOOKMAKER_MARGIN_CORRECTIONS[bk] = corr
+
+    return dict(BOOKMAKER_MARGIN_CORRECTIONS)
+
+
+def get_bookmaker_correction(bookmaker: str) -> float:
+    """Get margin correction factor for a specific bookmaker.
+
+    Parameters
+    ----------
+    bookmaker : str
+        Bookmaker key (e.g., "sportsbet").
+
+    Returns
+    -------
+    float
+        Correction factor (multiply implied_prob by this to get fair prob).
+    """
+    from src.config import BOOKMAKER_MARGIN_CORRECTION
+
+    return BOOKMAKER_MARGIN_CORRECTIONS.get(bookmaker, BOOKMAKER_MARGIN_CORRECTION)
 
 
 def get_best_bookmaker_odds(

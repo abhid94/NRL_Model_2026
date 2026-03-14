@@ -8,8 +8,8 @@
 
 ## Current Status
 
-**Active Phase**: Phase 5 — 2026 Season Data Ingestion
-**Last Updated**: 2026-02-25 (matches_2026 populated from Champion Data fixture — 204 matches, 27 rounds)
+**Active Phase**: Phase 5 — 2026 Season Live
+**Last Updated**: 2026-03-14 (Profitability Maximization Plan: 7 priorities + bug fix)
 
 ---
 
@@ -340,8 +340,71 @@
 - [x] `scripts/ingest_2026_fixture.py` — CLI runner with verification queries
 - [x] **matches_2026 populated**: 204 matches, 27 rounds, 17 teams, no orphan squad_ids
 
+### 2026 ROI Improvement Plan ✅ COMPLETE (2026-03-07)
+- [x] **Fix Kelly staking bug** — Kelly now uses `_display_odds` (best bookmaker price) instead of Betfair
+- [x] **Market-derived expected team tries** — new `src/features/market_features.py`:
+  - Betfair COMBINED_TOTAL → regression to expected team tries (100% coverage 2024-2025)
+  - Bet365 h2h via odds-api.io for 2026 live season
+  - Integrated into feature store (feature: `market_expected_team_tries`, `market_total_line`)
+- [x] **Best-price verification** — confirmed edge computation uses highest available odds
+- [x] **Line movement feature** — `line_movement = opening_implied_prob - closing_implied_prob`
+  - Schema already supports `snapshot_type`; just call `ingest_round_odds()` twice
+  - Feature added to feature store for 2026+
+- [x] **Per-bookmaker margin correction** — `BOOKMAKER_MARGIN_CORRECTIONS` dict in config
+  - `compute_bookmaker_margins()` updates from actual overround data
+  - `get_bookmaker_correction()` used in `predict_round.py` edge computation
+- [x] **Venue try-scoring feature** — `venue_avg_tries_per_match` from historical data
+  - New function in `game_context_features.py`, integrated into feature store
+  - 100% coverage, avg 8.1-8.3 tries/match
+- [x] **Recency-weighted training** — `sample_weight` in `GBMModel.fit()`
+  - Weights: current=1.0, prev=0.8, 2-ago=0.5, older=0.3
+  - `compute_recency_weights()` in `weekly_pipeline.py`
+
+### 2026 Profitability Maximization ✅ COMPLETE (2026-03-14)
+Research-backed improvements across 7 priorities + critical bug fix:
+
+- [x] **Bug fix: Drawdown Kelly adjustment** — `check_drawdown()` now runs BEFORE bet generation
+  - `kelly_adjustment` properly wired into `generate_bet_card()` via adaptive Kelly
+  - HALT/STOP status returns empty bet card (no bets during crisis)
+- [x] **P1: Bayesian shrinkage try rates** — `bayesian_try_rate`, `bayesian_confidence`, `bayesian_position_prior`
+  - Formula: `(n * player_rate + k * position_prior) / (n + k)` with k=10
+  - Position priors from POSITION_TRY_RATES in config (11 positions)
+  - Handles NaN rolling rates (first matches default to pure prior)
+- [x] **P2: EWM (exponential smoothing) features** — 6 new player + 2 team features
+  - Player: `ewm_tries_5`, `ewm_line_breaks_5`, `ewm_tackle_breaks_5`, `ewm_run_metres_5`
+  - Team: `ewm_team_attack_tries_5`, `ewm_opponent_tries_conceded_5`
+  - Uses `shift(1).ewm(span=5)` — no leakage, verified by tests
+- [x] **P3: Poisson expected team tries** — `poisson_expected_team_tries_{3,5,10}`
+  - Formula: `league_avg * (team_off / league_avg) * (opp_def / league_avg) * home_mult`
+  - Properly normalized by expanding league average (handles 2026 rule changes)
+- [x] **P4: Adaptive Kelly staking** — `compute_adaptive_kelly()` in weekly_pipeline
+  - Early season (rounds 1-4): 0.5× multiplier
+  - Drawdown: wired from `check_drawdown()` kelly_adjustment
+  - CLV trend: negative CLV for 3+ rounds → 0.6× multiplier
+  - `record_clv()` stores per-bet CLV in SQLite `clv_tracking` table
+- [x] **P5: Market decorrelation features** — multi-bookmaker consensus signals
+  - `bookmaker_consensus_spread`: max - min implied prob across bookmakers
+  - `n_bookmakers_offering`: count of bookmakers with odds per player
+  - `best_vs_median_odds`: outlier detection for slow-to-update bookmakers
+  - `odds_band`: categorical bucket (0-10%, 10-20%, 20-30%, 30-40%, 40%+)
+  - `market_miscalibration_by_position`: historical gap actual vs implied by position × band
+- [x] **P6: Scoring environment adjustment** — `scoring_environment_ratio` feature
+  - `current_season_avg_tries / historical_avg (4.0)` — captures 2026 six-man bench inflation
+  - Post-calibration scaling in CalibratedModel: if env ratio diverges >2pp, adjust probs
+- [x] **P7: CLV tracking & bookmaker rotation**
+  - `clv_tracking` SQLite table: season, round, match, player, model_prob, closing_prob, clv
+  - Bookmaker rotation: if >20 bets at one bookmaker in last 5 rounds, prefer 2nd-best
+  - Max odds gap 5% for rotation (don't sacrifice too much value)
+
+**Feature store expansion**: 351 → 365 columns (2024) / 375 columns (2025 with multi-bk features)
+**Test coverage**: 22/22 leakage tests passing (6 new tests added)
+**No features with |corr| > 0.5 to target** — all verified
+
 ### 2026 Live Data Pipeline (pending — starts Round 1)
 - [ ] Ingest Round 1 team lists: `ingest_round_team_lists(round_number=1, year=2026)`
+- [ ] Pull opening odds snapshot: `ingest_round_odds(round_number=1, season=2026, snapshot_type="opening")`
+- [ ] Pull closing odds snapshot: `ingest_round_odds(round_number=1, season=2026, snapshot_type="closing")`
+- [ ] Compute per-bookmaker margins: `compute_bookmaker_margins(conn, 2026)`
 - [ ] Generate Round 1 predictions: `python scripts/run_weekly_pipeline.py --season 2026 --round 1`
 - [ ] Monitor outcomes and log actuals
 

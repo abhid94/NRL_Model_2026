@@ -32,7 +32,7 @@ EXCLUDE_COLS = frozenset({
 BETFAIR_COLS_PREFIX = "betfair_"
 
 # Categorical columns to encode as LightGBM native categoricals
-CATEGORICAL_COLS = {"position_group", "position_code", "player_edge"}
+CATEGORICAL_COLS = {"position_group", "position_code", "player_edge", "odds_band"}
 
 
 def _detect_features(
@@ -122,7 +122,12 @@ class GBMModel(BaseModel):
         self._features: list[str] = []
         self._cat_features: list[str] = []
 
-    def fit(self, X: pd.DataFrame, y: np.ndarray) -> None:
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
         """Fit LightGBM on training data.
 
         Parameters
@@ -131,6 +136,9 @@ class GBMModel(BaseModel):
             Feature store DataFrame.
         y : array-like
             Binary target (0/1).
+        sample_weight : array-like, optional
+            Per-sample weights (e.g., recency weights: 2026=1.0,
+            2025=0.8, 2024=0.5). If None, all samples weighted equally.
         """
         y = np.asarray(y, dtype=int)
         self._features = _detect_features(X, exclude_betfair=self._exclude_betfair)
@@ -150,13 +158,21 @@ class GBMModel(BaseModel):
             verbose=-1,
             importance_type="gain",
         )
-        self._model.fit(
-            X_train, y,
-            categorical_feature=self._cat_features if self._cat_features else "auto",
-        )
+
+        fit_kwargs: dict = {
+            "categorical_feature": self._cat_features if self._cat_features else "auto",
+        }
+        if sample_weight is not None:
+            fit_kwargs["sample_weight"] = np.asarray(sample_weight, dtype=float)
+
+        self._model.fit(X_train, y, **fit_kwargs)
+
+        weight_info = ""
+        if sample_weight is not None:
+            weight_info = f", weighted (unique weights: {np.unique(sample_weight).tolist()})"
         LOGGER.info(
-            "GBM fitted on %d rows × %d features (exclude_betfair=%s)",
-            len(y), len(self._features), self._exclude_betfair,
+            "GBM fitted on %d rows × %d features (exclude_betfair=%s%s)",
+            len(y), len(self._features), self._exclude_betfair, weight_info,
         )
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:

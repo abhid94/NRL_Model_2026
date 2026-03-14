@@ -143,6 +143,22 @@ BOOKMAKER_DISPLAY_NAMES: dict[str, str] = {
 # Multiply bookmaker implied_prob by this factor to approximate Betfair scale.
 BOOKMAKER_MARGIN_CORRECTION: float = 0.88
 
+# Per-bookmaker margin corrections (updated from actual overround data).
+# Values represent 1/overround — multiply implied_prob by this to get fair prob.
+# Initialized to BOOKMAKER_MARGIN_CORRECTION; updated at runtime by
+# compute_bookmaker_margins() from actual odds data.
+BOOKMAKER_MARGIN_CORRECTIONS: dict[str, float] = {
+    "sportsbet": 0.88,
+    "tab": 0.88,
+    "ladbrokes_au": 0.88,
+    "pointsbetau": 0.88,
+    "betr_au": 0.88,
+    "tabtouch": 0.88,
+    "unibet": 0.88,
+    "betright": 0.88,
+    "bet365": 0.88,
+}
+
 # ---------------------------------------------------------------------------
 # Odds-API.io Configuration (https://odds-api.io — Bet365 odds source)
 # Free tier: 2 bookmakers, 100 requests/hour
@@ -172,6 +188,44 @@ JERSEY_TO_SIDE: dict[int, str] = {
     12: "Right",
 }
 JERSEY_DEFAULT_SIDE: str = "Middle"
+
+# ---------------------------------------------------------------------------
+# Position Try Rate Priors (from 2024-2025 data — CLAUDE.md Section 3.3 Note 7)
+# Used for Bayesian shrinkage of player try rates.
+# ---------------------------------------------------------------------------
+POSITION_TRY_RATES: dict[str, float] = {
+    "WG": 0.478,   # Wing
+    "FB": 0.375,   # Fullback
+    "CE": 0.278,   # Centre
+    "FE": 0.200,   # Five-eighth
+    "HB": 0.160,   # Halfback
+    "SR": 0.140,   # Second Row
+    "LK": 0.120,   # Lock
+    "HK": 0.100,   # Hooker
+    "PR": 0.086,   # Prop
+    "INT": 0.056,  # Interchange
+    "RES": 0.040,  # Reserve
+}
+
+# Bayesian shrinkage strength parameter (k in the prior weighting formula)
+BAYESIAN_SHRINKAGE_K: int = 10
+
+# EWM (exponential weighted moving average) span for form features
+EWM_SPAN: int = 5
+
+# ---------------------------------------------------------------------------
+# CLV Tracking & Adaptive Kelly Configuration
+# ---------------------------------------------------------------------------
+CLV_TABLE_NAME: str = "clv_tracking"
+CLV_NEGATIVE_ROUNDS_THRESHOLD: int = 3  # Reduce Kelly if negative CLV for N+ rounds
+CLV_NEGATIVE_MULTIPLIER: float = 0.6     # Kelly multiplier when CLV trend is negative
+EARLY_SEASON_ROUNDS: int = 4             # Rounds considered "early season"
+EARLY_SEASON_KELLY_MULTIPLIER: float = 0.5  # Kelly multiplier for early-season
+
+# Bookmaker rotation: max bets before preferring alternative
+BOOKMAKER_ROTATION_MAX_BETS: int = 20    # Max bets at one bookmaker in last 5 rounds
+BOOKMAKER_ROTATION_WINDOW: int = 5       # Rounds to look back for rotation
+BOOKMAKER_ROTATION_MAX_ODDS_GAP: float = 0.05  # Max odds gap (%) to switch bookmaker
 
 
 def position_from_jersey(jersey_number: int | None) -> PositionInfo:
