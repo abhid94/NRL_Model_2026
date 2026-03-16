@@ -12,6 +12,15 @@ xgboost>=2.0.0
 lightgbm>=4.1.0
 statsmodels>=0.14.0
 
+# Odds & devigging
+shin>=0.2.0
+
+# Hyperparameter optimization
+optuna>=4.0.0
+
+# Conformal prediction intervals
+mapie>=1.0.0
+
 # Explainability
 shap>=0.43.0
 

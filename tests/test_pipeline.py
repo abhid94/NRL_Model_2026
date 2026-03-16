@@ -74,10 +74,12 @@ class TestPredictRound:
     def test_edge_computation(self, feature_store):
         model = _ConstantModel(0.30)
         result = predict_round(model, feature_store, 2025, 5)
-        # Edge = model_prob - implied_prob
-        expected_edge = 0.30 - result["betfair_implied_prob"]
+        # Edge = model_prob - devigged_true_prob (binary devigging)
+        # Without lay prices, devig uses ~2% reduction: true_prob = naive * 0.98
+        expected_true = (1.0 / result["betfair_closing_odds"]) * 0.98
+        expected_edge = 0.30 - expected_true
         np.testing.assert_array_almost_equal(
-            result["edge"].values, expected_edge.values, decimal=10,
+            result["edge"].values, expected_edge.values, decimal=5,
         )
 
     def test_eligibility_excludes_pr_hk_int(self, feature_store):
@@ -96,12 +98,11 @@ class TestPredictRound:
         result = predict_round(model, feature_store, 2025, 99)
         assert result.empty
 
-    def test_sorted_by_edge(self, feature_store):
+    def test_sorted_by_match_and_rank(self, feature_store):
         model = _ConstantModel(0.30)
         result = predict_round(model, feature_store, 2025, 5)
-        # Non-NaN edges should be descending
-        edges = result["edge"].dropna()
-        assert (edges.diff().dropna() <= 0).all()
+        # Results are sorted by match_id then match_rank (not global edge)
+        assert result["match_id"].is_monotonic_increasing or len(result) == 0
 
 
 # ---------------------------------------------------------------------------

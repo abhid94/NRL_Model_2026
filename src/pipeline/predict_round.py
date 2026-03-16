@@ -15,6 +15,7 @@ import pandas as pd
 from src.config import ELIGIBLE_POSITION_CODES
 from src.features.feature_store import build_feature_store
 from src.models.baseline import BaseModel
+from src.odds.devig import devig_betfair_market, devig_binary, devig_bookmaker_ats
 
 LOGGER = logging.getLogger(__name__)
 
@@ -76,16 +77,22 @@ def predict_round(
             "model_prob", "edge", "is_eligible",
         ])
 
-    # Predict
-    model_probs = model.predict_proba(round_df)
-    round_df["model_prob"] = model_probs
+    # Predict (with conformal intervals if available)
+    from src.models.conformal import ConformalModel
 
-    # Compute edge vs market
-    round_df["edge"] = np.where(
-        round_df["betfair_implied_prob"].notna(),
-        round_df["model_prob"] - round_df["betfair_implied_prob"],
-        np.nan,
-    )
+    if isinstance(model, ConformalModel):
+        probs, lower, upper, is_confident = model.predict_with_intervals(round_df)
+        round_df["model_prob"] = probs
+        round_df["prob_lower"] = lower
+        round_df["prob_upper"] = upper
+        round_df["is_confident"] = is_confident
+        round_df["interval_width"] = upper - lower
+    else:
+        model_probs = model.predict_proba(round_df)
+        round_df["model_prob"] = model_probs
+
+    # Compute edge vs market using Shin devigging where possible
+    round_df = _compute_devigged_edge(round_df)
 
     # Enrich with multi-bookmaker odds for 2026+ seasons
     if conn is not None and season >= 2026:
@@ -102,6 +109,15 @@ def predict_round(
         & round_df[implied_col].notna()
         & (round_df[implied_col] > 0)
     )
+    # Filter out low-confidence predictions (conformal intervals too wide)
+    if "is_confident" in round_df.columns:
+        n_before = round_df["is_eligible"].sum()
+        round_df["is_eligible"] = round_df["is_eligible"] & round_df["is_confident"]
+        n_filtered = n_before - round_df["is_eligible"].sum()
+        if n_filtered > 0:
+            LOGGER.info(
+                "Conformal filter: removed %d low-confidence predictions", n_filtered,
+            )
 
     # Add player name from DB
     if conn is not None:
@@ -122,6 +138,8 @@ def predict_round(
         "position_code", "position_group", "is_starter", "is_home",
         "model_prob", "match_rank",
         "betfair_implied_prob", "betfair_closing_odds",
+        "devigged_true_prob",
+        "prob_lower", "prob_upper", "interval_width", "is_confident",
         "edge", "is_eligible",
         "best_odds", "best_bookmaker", "best_implied_prob",
     ]
@@ -145,6 +163,72 @@ def predict_round(
     )
 
     return result.reset_index(drop=True)
+
+
+def _compute_devigged_edge(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute edge using binary devigging on Betfair back/lay prices.
+
+    ATS markets are non-mutually-exclusive — standard devigging (Shin,
+    multiplicative to sum=1) is wrong. Instead, we devig each player's
+    binary market individually using the back/lay midpoint.
+
+    When lay price data is available via betfair_spread, uses
+    ``devig_binary(back, lay)`` for precise per-player true probability.
+    Otherwise falls back to a ~2% Betfair commission estimate.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Round predictions with betfair_closing_odds, betfair_implied_prob,
+        betfair_spread, and model_prob columns.
+
+    Returns
+    -------
+    pd.DataFrame
+        With updated ``edge`` and new ``devigged_true_prob`` columns.
+    """
+    if "betfair_closing_odds" not in df.columns:
+        df["edge"] = np.nan
+        return df
+
+    df["devigged_true_prob"] = np.nan
+    df["edge"] = np.nan
+
+    has_spread = "betfair_spread" in df.columns
+    n_binary = 0
+    n_fallback = 0
+
+    for idx in df.index:
+        back = df.loc[idx, "betfair_closing_odds"]
+        if pd.isna(back) or back <= 1.0:
+            continue
+
+        lay = None
+        if has_spread:
+            spread = df.loc[idx, "betfair_spread"]
+            if pd.notna(spread) and spread != 0:
+                # spread = back - lay (from betfair.py)
+                lay = back - spread
+                if lay <= 1.0:
+                    lay = None
+
+        true_prob = devig_binary(back, lay)
+        df.loc[idx, "devigged_true_prob"] = true_prob
+        df.loc[idx, "edge"] = df.loc[idx, "model_prob"] - true_prob
+
+        if lay is not None:
+            n_binary += 1
+        else:
+            n_fallback += 1
+
+    n_total = df["betfair_closing_odds"].notna().sum()
+    if n_total > 0:
+        LOGGER.info(
+            "Betfair devigging: %d binary (back/lay), %d fallback (~2%% est), %d total",
+            n_binary, n_fallback, n_total,
+        )
+
+    return df
 
 
 def _add_player_names(
@@ -309,18 +393,20 @@ def _add_bookmaker_odds(
         how="left",
     )
 
-    # Apply per-bookmaker margin correction to best_implied_prob
+    # Devig bookmaker odds: per-bookmaker margin correction
+    # For ATS (non-mutually-exclusive), use empirical correction factors
     if "best_implied_prob" in df.columns and "best_bookmaker" in df.columns:
-        df["best_implied_prob"] = df.apply(
-            lambda row: (
-                row["best_implied_prob"] * get_bookmaker_correction(row["best_bookmaker"])
-                if pd.notna(row.get("best_bookmaker")) and pd.notna(row.get("best_implied_prob"))
-                else row["best_implied_prob"]
-            ),
-            axis=1,
-        )
+        for idx in df.index:
+            bk = df.loc[idx, "best_bookmaker"]
+            ip = df.loc[idx, "best_implied_prob"]
+            if pd.notna(bk) and pd.notna(ip):
+                correction = get_bookmaker_correction(bk)
+                df.loc[idx, "best_implied_prob"] = devig_bookmaker_ats(
+                    df.loc[idx, "best_odds"],
+                    bookmaker_correction=correction,
+                ) if pd.notna(df.loc[idx, "best_odds"]) else ip * correction
 
-    # Recompute edge against best bookmaker implied prob (margin-corrected)
+    # Recompute edge against devigged bookmaker implied prob
     if "best_implied_prob" in df.columns:
         df["edge"] = np.where(
             df["best_implied_prob"].notna(),
