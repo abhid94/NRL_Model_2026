@@ -84,15 +84,32 @@ def discover_training_seasons() -> list[int]:
         conn.close()
 
 
-def get_default_model() -> BaseModel:
+def get_default_model(use_optuna: bool = False) -> BaseModel:
     """Return the default production model.
+
+    Parameters
+    ----------
+    use_optuna : bool
+        If True and ``data/model_artifacts/optuna_best_params.json`` exists,
+        use Optuna-optimized hyperparameters. Otherwise use the manually-tuned
+        Phase 5B config (more conservative, proven cross-season stability).
 
     Returns
     -------
     BaseModel
-        CalibratedGBM with regularization (Phase 5B best config).
-        n=150, depth=4, reg=3.0, min_child=80 — tuned for cross-season stability.
+        CalibratedGBM.
     """
+    if use_optuna:
+        params = _load_optuna_params()
+        if params is not None:
+            LOGGER.info("Using Optuna-optimized params: %s", params)
+            return CalibratedModel(
+                GBMModel(**params),
+                method="sigmoid",
+                cal_rounds=5,
+            )
+        LOGGER.info("Optuna params not found, using default config")
+
     return CalibratedModel(
         GBMModel(
             n_estimators=150,
@@ -104,6 +121,26 @@ def get_default_model() -> BaseModel:
         method="sigmoid",
         cal_rounds=5,
     )
+
+
+def _load_optuna_params() -> dict | None:
+    """Load Optuna best params from disk if available.
+
+    Returns
+    -------
+    dict or None
+        GBM hyperparameters, or None if file doesn't exist.
+    """
+    path = MODEL_ARTIFACTS_DIR / "optuna_best_params.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("params")
+    except Exception as exc:
+        LOGGER.warning("Failed to load Optuna params: %s", exc)
+        return None
 
 
 def run_weekly_pipeline(

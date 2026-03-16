@@ -21,6 +21,9 @@ optuna>=4.0.0
 # Conformal prediction intervals
 mapie>=1.0.0
 
+# Weather data (BOM Australia)
+weather-au>=0.0.7
+
 # Explainability
 shap>=0.43.0
 
