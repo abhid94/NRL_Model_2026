@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  NRL ATS: Outcome Ingestion (Monday/Tuesday)
+
+  After each round completes, ingest match results and record CLV.
+  Schedule: Tuesday 10:00 AEDT (00:00 UTC Monday night)
+
+  Install:
+    cp scripts/automation/com.nrl.outcome-ingestion.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.nrl.outcome-ingestion.plist
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.nrl.outcome-ingestion.plist
+-->
+<dict>
+    <key>Label</key>
+    <string>com.nrl.outcome-ingestion</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Frameworks/Python.framework/Versions/3.12/bin/python3</string>
+        <string>/Users/abhidutta/Documents/repos/NRL_2026_Model/scripts/ingest_outcomes.py</string>
+        <string>--season</string>
+        <string>2026</string>
+        <string>--round</string>
+        <!-- Update this each week or use a wrapper script -->
+        <string>3</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>2</integer><!-- Tuesday -->
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/abhidutta/Documents/repos/NRL_2026_Model/data/logs/outcome_ingestion.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/abhidutta/Documents/repos/NRL_2026_Model/data/logs/outcome_ingestion.err</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/abhidutta/Documents/repos/NRL_2026_Model</string>
+</dict>
+</plist>

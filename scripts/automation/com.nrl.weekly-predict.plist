@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  NRL ATS: Weekly Prediction Pipeline (Wednesday/Thursday)
+
+  After team lists are confirmed, run predictions for the upcoming round.
+  Schedule: Wednesday 18:00 AEDT (after team list confirmations)
+
+  Install:
+    cp scripts/automation/com.nrl.weekly-predict.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.nrl.weekly-predict.plist
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.nrl.weekly-predict.plist
+-->
+<dict>
+    <key>Label</key>
+    <string>com.nrl.weekly-predict</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Frameworks/Python.framework/Versions/3.12/bin/python3</string>
+        <string>/Users/abhidutta/Documents/repos/NRL_2026_Model/scripts/run_weekly_pipeline.py</string>
+        <string>--season</string>
+        <string>2026</string>
+        <string>--round</string>
+        <!-- Update this each week or use a wrapper script -->
+        <string>3</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>4</integer><!-- Thursday -->
+        <key>Hour</key>
+        <integer>18</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/abhidutta/Documents/repos/NRL_2026_Model/data/logs/weekly_predict.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/abhidutta/Documents/repos/NRL_2026_Model/data/logs/weekly_predict.err</string>
+    <key>WorkingDirectory</key>
+    <string>/Users/abhidutta/Documents/repos/NRL_2026_Model</string>
+</dict>
+</plist>
