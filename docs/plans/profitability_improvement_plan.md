@@ -1,7 +1,7 @@
 # Plan: Agents & Tools to Improve NRL 2026 Betting Model Profitability
 
 > **Created**: 2026-03-16
-> **Last Updated**: 2026-03-16
+> **Last Updated**: 2026-03-17
 > **Branch**: `feature/profitability-improvements`
 > **Status**: In Progress
 
@@ -58,7 +58,7 @@ The NRL 2026 ATS betting model is substantially built (365+ features, +19.7% bac
 - **Integration**: Replace `implied_probability = 1/decimal_odds` in `src/odds/bookmaker.py` and `src/odds/edge.py`
 - **Impact**: +0.5-1pp ROI from better edge calculation
 - **Effort**: 1-2 hours
-- **Status**: [ ]
+- **Status**: [x] Binary devigging for ATS (Shin wrong for non-mutual-exclusive)
 
 #### 2. `optuna` - Bayesian Hyperparameter Optimization
 - **Repo**: https://github.com/optuna/optuna
@@ -67,7 +67,7 @@ The NRL 2026 ATS betting model is substantially built (365+ features, +19.7% bac
 - **Integration**: Wrap GBM training in `src/models/gbm.py` with Optuna study
 - **Impact**: +1-2pp ROI from better model params
 - **Effort**: Half day
-- **Status**: [ ]
+- **Status**: [x] src/models/hyperopt.py created
 
 #### 3. Weather Features via `weather-au`
 - **Install**: `pip install weather-au`
@@ -83,7 +83,7 @@ The NRL 2026 ATS betting model is substantially built (365+ features, +19.7% bac
 - **Integration**: Add to `src/odds/edge.py` for proper margin removal
 - **Impact**: +0.5pp ROI from more accurate true probability estimation
 - **Effort**: 2-3 hours
-- **Status**: [ ]
+- **Status**: [x] Integrated into devig.py (binary + margin correction approach)
 
 ### Tier 2: Implement This Week
 
@@ -94,7 +94,7 @@ The NRL 2026 ATS betting model is substantially built (365+ features, +19.7% bac
 - **Integration**: Wrap CalibratedModel output in `src/models/calibration.py`
 - **Impact**: +1pp ROI from avoiding low-confidence bets
 - **Effort**: Half day
-- **Status**: [ ]
+- **Status**: [x] src/models/conformal.py created, wired into predict_round
 
 #### 6. `netcal` - Advanced Calibration
 - **Repo**: https://github.com/EFS-OpenSource/calibration-framework
@@ -156,7 +156,7 @@ The NRL 2026 ATS betting model is substantially built (365+ features, +19.7% bac
 - **Integration**: Add custom objective in `src/models/gbm.py`
 - **Impact**: +1-2pp ROI (trains model for the actual goal)
 - **Effort**: 2-3 days
-- **Status**: [ ]
+- **Status**: [x] src/models/custom_loss.py created
 
 #### 13. Correlated Kelly Portfolio Optimization
 - **Repo**: https://github.com/thk3421-models/KellyPortfolio
@@ -190,10 +190,10 @@ The NRL 2026 ATS betting model is substantially built (365+ features, +19.7% bac
 These are **blocking issues** that limit profitability regardless of new tools:
 
 ### Gap 1: Outcome Ingestion Pipeline (P0)
-- [ ] Predictions logged for 2026 R1-R2 but NO actual outcomes ingested
-- [ ] Can't measure CLV, can't recalibrate, can't validate live performance
-- **Fix**: Build `ingest_match_outcomes()` using existing `score_flow_{year}` table
-- **Agent**: Data Engineer
+- [x] `ingest_outcomes_and_clv()` added to weekly_pipeline.py
+- [x] Fetches completed match data via Champion Data API
+- [x] Evaluates predictions vs actuals, computes P&L
+- **Status**: DONE
 
 ### Gap 2: Opening Odds Snapshot (P1)
 - [ ] Infrastructure exists but only closing odds captured
@@ -208,10 +208,9 @@ These are **blocking issues** that limit profitability regardless of new tools:
 - **Agent**: DevOps Automator
 
 ### Gap 4: CLV Tracking Wiring (P1)
-- [ ] Table created but `record_clv()` never called
-- [ ] Adaptive Kelly can't adjust without CLV data
-- **Fix**: Call `record_clv()` after outcome ingestion
-- **Agent**: Data Engineer
+- [x] `record_clv()` now called inside `ingest_outcomes_and_clv()`
+- [x] Wired to adaptive Kelly via existing `_get_clv_kelly_multiplier()`
+- **Status**: DONE
 
 ---
 

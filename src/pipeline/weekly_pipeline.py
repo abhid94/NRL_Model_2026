@@ -700,3 +700,175 @@ def load_prediction_log(
 
     dfs = [pd.read_csv(f) for f in files]
     return pd.concat(dfs, ignore_index=True)
+
+
+def ingest_outcomes_and_clv(
+    season: int,
+    round_number: int,
+    conn: "sqlite3.Connection | None" = None,
+) -> dict[str, Any]:
+    """Ingest match outcomes for a completed round and record CLV.
+
+    This is the Monday/Tuesday step: after the round completes, fetch
+    actual results from Champion Data, compare to our predictions, and
+    record CLV for adaptive Kelly.
+
+    Parameters
+    ----------
+    season : int
+        Season year.
+    round_number : int
+        Completed round number.
+    conn : sqlite3.Connection, optional
+        Database connection. Opens one if None.
+
+    Returns
+    -------
+    dict[str, Any]
+        Summary with keys: ingestion (match data summary),
+        clv_records (number of CLV entries), evaluation (P&L summary).
+    """
+    close_conn = False
+    if conn is None:
+        conn = get_connection(DB_PATH)
+        close_conn = True
+
+    try:
+        result: dict[str, Any] = {
+            "ingestion": {},
+            "clv_records": 0,
+            "evaluation": {},
+        }
+
+        # Step 1: Ingest match data from Champion Data
+        LOGGER.info("Outcome ingestion: Season %d Round %d", season, round_number)
+        try:
+            from src.ingestion.ingest_match_data import fetch_and_ingest_completed_matches
+            ingestion_summary = fetch_and_ingest_completed_matches(season, conn=conn)
+            result["ingestion"] = ingestion_summary
+            LOGGER.info(
+                "  Ingested %d matches (%d failed)",
+                ingestion_summary.get("n_ingested", 0),
+                ingestion_summary.get("n_failed", 0),
+            )
+        except Exception as exc:
+            LOGGER.error("Match data ingestion failed: %s", exc)
+            result["ingestion"] = {"error": str(exc)}
+
+        # Step 2: Load predictions for this round
+        pred_log = load_prediction_log(season, round_number)
+        if pred_log.empty:
+            LOGGER.warning("No prediction log found for season %d round %d", season, round_number)
+            return result
+
+        # Step 3: Load actual outcomes (who scored tries)
+        ps_table = get_table(f"player_stats", season)
+        if not table_exists(conn, ps_table):
+            LOGGER.warning("Table %s not found — can't evaluate outcomes", ps_table)
+            return result
+
+        actuals = pd.read_sql_query(
+            f"""
+            SELECT ps.match_id, ps.player_id,
+                   CASE WHEN ps.tries > 0 THEN 1 ELSE 0 END AS scored_try,
+                   ps.tries
+            FROM {ps_table} ps
+            JOIN matches_{season} m ON ps.match_id = m.match_id
+            WHERE m.round_number = ?
+            """,
+            conn,
+            params=(round_number,),
+        )
+
+        if actuals.empty:
+            LOGGER.warning("No actual outcomes for round %d (data not yet ingested?)", round_number)
+            return result
+
+        # Step 4: Merge predictions with actuals
+        merged = pred_log.merge(
+            actuals[["match_id", "player_id", "scored_try"]],
+            on=["match_id", "player_id"],
+            how="inner",
+        )
+
+        if merged.empty:
+            LOGGER.warning("No matching predictions/actuals for round %d", round_number)
+            return result
+
+        # Step 5: Record CLV for bets placed
+        bet_log_dir = BACKTEST_RESULTS_DIR / "prediction_logs"
+        bet_files = sorted(bet_log_dir.glob(f"bets_{season}_R{round_number:02d}_*.csv"))
+        clv_records: list[dict] = []
+
+        if bet_files:
+            bet_df = pd.read_csv(bet_files[-1])  # Use most recent bet file
+            for _, bet_row in bet_df.iterrows():
+                # Find the matching prediction
+                pred_match = merged[
+                    (merged["match_id"] == bet_row["match_id"])
+                    & (merged["player_id"] == bet_row["player_id"])
+                ]
+                if pred_match.empty:
+                    continue
+
+                closing_prob = None
+                if "betfair_implied_prob" in pred_match.columns:
+                    closing_prob = float(pred_match.iloc[0]["betfair_implied_prob"])
+
+                clv_records.append({
+                    "match_id": int(bet_row["match_id"]),
+                    "player_id": int(bet_row["player_id"]),
+                    "model_prob": float(bet_row["model_prob"]),
+                    "closing_prob": closing_prob,
+                    "bookmaker": bet_row.get("bookmaker", ""),
+                })
+
+            if clv_records:
+                n_clv = record_clv(season, round_number, clv_records, conn)
+                result["clv_records"] = n_clv
+                LOGGER.info("  Recorded %d CLV entries", n_clv)
+
+        # Step 6: Evaluate P&L for bets
+        if bet_files:
+            bet_df = pd.read_csv(bet_files[-1])
+            bet_merged = bet_df.merge(
+                actuals[["match_id", "player_id", "scored_try"]],
+                on=["match_id", "player_id"],
+                how="inner",
+            )
+
+            if not bet_merged.empty:
+                n_bets = len(bet_merged)
+                n_wins = int(bet_merged["scored_try"].sum())
+                total_staked = float(bet_merged["stake"].sum())
+                payout = float(
+                    (bet_merged["scored_try"] * bet_merged["odds"] * bet_merged["stake"]).sum()
+                )
+                profit = payout - total_staked
+                roi = profit / total_staked if total_staked > 0 else 0.0
+
+                eval_summary = {
+                    "n_bets": n_bets,
+                    "n_wins": n_wins,
+                    "win_rate": n_wins / n_bets if n_bets > 0 else 0.0,
+                    "total_staked": round(total_staked, 2),
+                    "total_payout": round(payout, 2),
+                    "profit": round(profit, 2),
+                    "roi": round(roi, 4),
+                }
+                result["evaluation"] = eval_summary
+                LOGGER.info(
+                    "  Round P&L: %d bets, %d wins, $%.0f staked, $%.0f profit (%.1f%% ROI)",
+                    n_bets, n_wins, total_staked, profit, roi * 100,
+                )
+
+                # Save evaluation to log
+                eval_path = bet_log_dir / f"eval_{season}_R{round_number:02d}.json"
+                with open(eval_path, "w") as f:
+                    json.dump(eval_summary, f, indent=2)
+
+        return result
+
+    finally:
+        if close_conn:
+            conn.close()
