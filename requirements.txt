@@ -27,6 +27,16 @@ weather-au>=0.0.7
 # Advanced calibration (BBQ, ENIR)
 netcal>=1.0.0
 
+# Automated time series features
+tsfresh>=0.20.0
+
+# Bayesian hierarchical models
+pymc>=5.0.0
+
+# Betfair exchange trading
+flumine>=2.0.0
+betfairlightweight>=2.0.0
+
 # Explainability
 shap>=0.43.0
 

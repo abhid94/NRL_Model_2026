@@ -103,6 +103,7 @@ def generate_bet_card(
     max_bets_per_round: int = MAX_BETS_PER_ROUND,
     min_stake: float = MIN_STAKE,
     flat_stake: float | None = None,
+    use_portfolio_kelly: bool = False,
 ) -> BetCard:
     """Generate a bet card from predictions.
 
@@ -170,6 +171,14 @@ def generate_bet_card(
 
     if flat_stake is not None:
         df["stake"] = flat_stake
+    elif use_portfolio_kelly and len(df) > 1:
+        # Correlated portfolio Kelly — accounts for within-match correlation
+        from src.pipeline.portfolio_kelly import optimize_portfolio_stakes
+        stakes = optimize_portfolio_stakes(
+            df, bankroll=bankroll, kelly_fraction=kelly_fraction,
+            max_stake_pct=max_stake_pct, max_round_exposure_pct=max_round_exposure_pct,
+        )
+        df["stake"] = stakes
     else:
         # Enhanced Kelly staking with position and confidence adjustments
         df["stake"] = df.apply(
