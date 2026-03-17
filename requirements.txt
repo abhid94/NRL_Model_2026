@@ -24,6 +24,9 @@ mapie>=1.0.0
 # Weather data (BOM Australia)
 weather-au>=0.0.7
 
+# Advanced calibration (BBQ, ENIR)
+netcal>=1.0.0
+
 # Explainability
 shap>=0.43.0
 

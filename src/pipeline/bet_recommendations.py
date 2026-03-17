@@ -171,11 +171,13 @@ def generate_bet_card(
     if flat_stake is not None:
         df["stake"] = flat_stake
     else:
-        # Kelly staking (fallback if flat_stake not provided)
+        # Enhanced Kelly staking with position and confidence adjustments
         df["stake"] = df.apply(
             lambda row: _kelly_stake(
                 row["edge"], row["_display_odds"],
                 bankroll, kelly_fraction,
+                position_code=row.get("position_code"),
+                interval_width=row.get("interval_width"),
             ),
             axis=1,
         )
@@ -267,8 +269,14 @@ def _kelly_stake(
     odds: float,
     bankroll: float,
     kelly_fraction: float,
+    position_code: str | None = None,
+    interval_width: float | None = None,
 ) -> float:
-    """Compute fractional Kelly stake.
+    """Compute enhanced fractional Kelly stake.
+
+    Applies per-position scaling (backs get full fraction, forwards get
+    reduced) and confidence-based scaling (wider conformal intervals
+    reduce stake).
 
     Parameters
     ----------
@@ -279,7 +287,11 @@ def _kelly_stake(
     bankroll : float
         Current bankroll.
     kelly_fraction : float
-        Kelly fraction (e.g. 0.25 for quarter Kelly).
+        Base Kelly fraction (e.g. 0.25 for quarter Kelly).
+    position_code : str, optional
+        Player position code. Backs get full fraction, others scaled down.
+    interval_width : float, optional
+        Conformal prediction interval width. Wider = less confident = lower stake.
 
     Returns
     -------
@@ -288,8 +300,32 @@ def _kelly_stake(
     """
     if edge <= 0 or odds <= 1:
         return 0.0
-    kelly = kelly_fraction * edge / (odds - 1)
+
+    # Per-position Kelly scaling: model is more accurate for backs
+    position_multiplier = _POSITION_KELLY_MULTIPLIERS.get(position_code, 0.7)
+    adjusted_fraction = kelly_fraction * position_multiplier
+
+    # Confidence scaling: reduce stake when prediction interval is wide
+    if interval_width is not None and interval_width > 0:
+        # Scale from 1.0 (interval=0) to 0.5 (interval=0.3+)
+        confidence_mult = max(0.5, 1.0 - interval_width)
+        adjusted_fraction *= confidence_mult
+
+    kelly = adjusted_fraction * edge / (odds - 1)
     return kelly * bankroll
+
+
+# Per-position Kelly multipliers: model is more reliable for backs
+# (higher sample sizes, clearer signal) than forwards (rare try scorers)
+_POSITION_KELLY_MULTIPLIERS: dict[str, float] = {
+    "WG": 1.0,    # Wings — highest try rate, most predictable
+    "FB": 1.0,    # Fullback — high try rate
+    "CE": 0.95,   # Centre — good predictability
+    "FE": 0.85,   # Five-eighth — moderate
+    "HB": 0.85,   # Halfback — moderate
+    "SR": 0.75,   # Second Row — less predictable
+    "LK": 0.70,   # Lock — less predictable
+}
 
 
 def _get_recent_bookmaker_counts(
