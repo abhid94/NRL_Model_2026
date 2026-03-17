@@ -75,7 +75,7 @@ The NRL 2026 ATS betting model is substantially built (365+ features, +19.7% bac
 - **Integration**: Add `src/features/weather_features.py`, join to match venue/date
 - **Impact**: +0.5-1pp ROI (weather is a strong signal the market may underweight)
 - **Effort**: 1 day
-- **Status**: [ ]
+- **Status**: [x] src/features/weather_features.py, 28 venues mapped, wired into feature_store
 
 #### 4. Devigging Scripts (BettingIsCool)
 - **Source**: https://bettingiscool.com/2024/03/18/a-python-script-to-remove-the-overround-from-bookmaker-odds/
@@ -103,7 +103,7 @@ The NRL 2026 ATS betting model is substantially built (365+ features, +19.7% bac
 - **Integration**: Test in `src/models/calibration.py` as alternative calibrators
 - **Impact**: +0.5pp ROI from tighter calibration
 - **Effort**: Half day
-- **Status**: [ ]
+- **Status**: [x] BBQ + ENIR integrated into CalibratedModel and PositionCalibratedModel
 
 #### 7. `keeks` - Advanced Kelly Staking
 - **Repo**: https://github.com/wdm0006/keeks
@@ -112,7 +112,7 @@ The NRL 2026 ATS betting model is substantially built (365+ features, +19.7% bac
 - **Integration**: Replace/augment `src/pipeline/weekly_pipeline.py` kelly logic
 - **Impact**: +0.5-1pp ROI from better stake sizing
 - **Effort**: Half day
-- **Status**: [ ]
+- **Status**: [x] keeks discarded (buggy API). Built own position-scaled Kelly + confidence scaling instead.
 
 ### Tier 3: Implement This Month
 
