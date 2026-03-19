@@ -469,6 +469,15 @@ def build_feature_store(
             df['betfair_closing_odds'] = np.nan
         df = _fill_odds_from_bookmaker(df, conn, season)
 
+    # 11. Add weather features
+    try:
+        from src.features.weather_features import add_weather_features
+        live = (season >= 2026 and not include_target)  # Live fetch for predictions only
+        df = add_weather_features(df, conn, season, live_fetch=live)
+        logger.info(f"After weather features: {len(df)} rows")
+    except Exception:
+        logger.warning(f"Weather features unavailable for {season} — skipping")
+
     # Add season column
     df['season'] = season
 

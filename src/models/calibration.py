@@ -1,9 +1,17 @@
 """Post-hoc probability calibration for ATS models.
 
-Wraps any BaseModel with Platt scaling (sigmoid) or isotonic regression
-to produce well-calibrated probabilities. Uses temporal-safe splitting:
-the calibrator is fit on the last N rounds of training data, not the
-same data used for model fitting.
+Wraps any BaseModel with Platt scaling (sigmoid), isotonic regression,
+BBQ (Bayesian Binning into Quantiles), or ENIR (Extended Near Isotonic
+Regression) to produce well-calibrated probabilities.
+
+Uses temporal-safe splitting: the calibrator is fit on the last N rounds
+of training data, not the same data used for model fitting.
+
+Available methods:
+- "isotonic": sklearn IsotonicRegression (default, good general choice)
+- "sigmoid": Platt scaling via LogisticRegression
+- "bbq": Bayesian Binning into Quantiles (netcal, best for small samples)
+- "enir": Extended Near Isotonic Regression (netcal, smooth + monotonic)
 """
 
 from __future__ import annotations
@@ -40,6 +48,8 @@ class CalibratedModel(BaseModel):
         in recent rounds diverges from calibration-period rate by >2pp.
     """
 
+    SUPPORTED_METHODS = ("isotonic", "sigmoid", "bbq", "enir")
+
     def __init__(
         self,
         base_model: BaseModel,
@@ -47,8 +57,8 @@ class CalibratedModel(BaseModel):
         cal_rounds: int = 5,
         scoring_env_adjust: bool = True,
     ) -> None:
-        if method not in ("isotonic", "sigmoid"):
-            raise ValueError(f"method must be 'isotonic' or 'sigmoid', got '{method}'")
+        if method not in self.SUPPORTED_METHODS:
+            raise ValueError(f"method must be one of {self.SUPPORTED_METHODS}, got '{method}'")
         self._base_model = base_model
         self._method = method
         self._cal_rounds = cal_rounds
@@ -118,10 +128,18 @@ class CalibratedModel(BaseModel):
                 y_min=0.0, y_max=1.0, out_of_bounds="clip",
             )
             self._calibrator.fit(raw_probs, y_cal)
-        else:
+        elif self._method == "sigmoid":
             # Platt scaling: logistic regression on log-odds
             self._calibrator = LogisticRegression(C=1e10, solver="lbfgs", max_iter=1000)
             self._calibrator.fit(raw_probs.reshape(-1, 1), y_cal)
+        elif self._method == "bbq":
+            from netcal.binning import BBQ
+            self._calibrator = BBQ()
+            self._calibrator.fit(raw_probs, y_cal)
+        elif self._method == "enir":
+            from netcal.binning import ENIR
+            self._calibrator = ENIR()
+            self._calibrator.fit(raw_probs, y_cal)
 
         # Store calibration-period try rate for scoring environment adjustment
         self._cal_try_rate = float(y_cal.mean())
@@ -150,8 +168,12 @@ class CalibratedModel(BaseModel):
 
         if self._method == "isotonic":
             calibrated = self._calibrator.predict(raw_probs)
-        else:
+        elif self._method == "sigmoid":
             calibrated = self._calibrator.predict_proba(raw_probs.reshape(-1, 1))[:, 1]
+        elif self._method in ("bbq", "enir"):
+            calibrated = self._calibrator.transform(raw_probs)
+        else:
+            calibrated = raw_probs
 
         # Scoring environment adjustment: if observed try rate in data
         # diverges from calibration-period rate by >2pp, apply multiplicative correction
@@ -207,8 +229,8 @@ class PositionCalibratedModel(BaseModel):
         cal_rounds: int = 5,
         min_samples_per_group: int = 30,
     ) -> None:
-        if method not in ("isotonic", "sigmoid"):
-            raise ValueError(f"method must be 'isotonic' or 'sigmoid', got '{method}'")
+        if method not in CalibratedModel.SUPPORTED_METHODS:
+            raise ValueError(f"method must be one of {CalibratedModel.SUPPORTED_METHODS}, got '{method}'")
         self._base_model = base_model
         self._method = method
         self._cal_rounds = cal_rounds
@@ -221,16 +243,30 @@ class PositionCalibratedModel(BaseModel):
         if self._method == "isotonic":
             cal = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
             cal.fit(raw_probs, y)
-        else:
+        elif self._method == "sigmoid":
             cal = LogisticRegression(C=1e10, solver="lbfgs", max_iter=1000)
             cal.fit(raw_probs.reshape(-1, 1), y)
+        elif self._method == "bbq":
+            from netcal.binning import BBQ
+            cal = BBQ()
+            cal.fit(raw_probs, y)
+        elif self._method == "enir":
+            from netcal.binning import ENIR
+            cal = ENIR()
+            cal.fit(raw_probs, y)
+        else:
+            raise ValueError(f"Unknown method: {self._method}")
         return cal
 
     def _predict_calibrator(self, cal, raw_probs: np.ndarray) -> np.ndarray:
         """Predict with a single calibrator."""
         if self._method == "isotonic":
             return cal.predict(raw_probs)
-        return cal.predict_proba(raw_probs.reshape(-1, 1))[:, 1]
+        elif self._method == "sigmoid":
+            return cal.predict_proba(raw_probs.reshape(-1, 1))[:, 1]
+        elif self._method in ("bbq", "enir"):
+            return cal.transform(raw_probs)
+        return raw_probs
 
     def fit(self, X: pd.DataFrame, y: np.ndarray, **kwargs) -> None:
         """Fit base model + per-position calibrators."""

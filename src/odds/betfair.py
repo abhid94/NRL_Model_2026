@@ -30,7 +30,11 @@ logger = logging.getLogger(__name__)
 
 def odds_to_implied_probability(decimal_odds: float) -> float:
     """
-    Convert decimal odds to implied probability.
+    Convert decimal odds to naive implied probability.
+
+    Note: This returns the raw 1/odds value. For true probability
+    extraction that corrects for bookmaker margin and favourite-longshot
+    bias, use ``src.odds.devig.devig_odds()`` with Shin's method.
 
     Parameters
     ----------
