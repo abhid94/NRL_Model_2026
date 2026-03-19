@@ -359,6 +359,8 @@ def ingest_round_team_lists(
     round_number: int,
     year: int,
     conn: Optional[sqlite3.Connection] = None,
+    *,
+    url_override: str | None = None,
 ) -> dict[str, Any]:
     """Ingest team lists for a given round into the database.
 
@@ -380,6 +382,9 @@ def ingest_round_team_lists(
     conn : sqlite3.Connection, optional
         Existing DB connection. If None, a new connection is opened and closed
         at the end of this call.
+    url_override : str | None
+        If provided, passed to the scraper to use a specific URL instead of
+        the generated one.
 
     Returns
     -------
@@ -400,7 +405,7 @@ def ingest_round_team_lists(
         create_nrl_player_mapping_table(conn)
 
         # Step 1: Scrape
-        raw_records = fetch_team_lists(round_number, year)
+        raw_records = fetch_team_lists(round_number, year, url_override=url_override)
         n_scraped = len(raw_records)
         LOGGER.info("Scraped %d player records", n_scraped)
 

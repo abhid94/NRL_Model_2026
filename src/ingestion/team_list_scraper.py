@@ -49,6 +49,10 @@ _NRL_ARTICLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Regex to extract round number from LeagueUnlimited <h1> title
+# e.g. "NRL 2026 - Round 3 - Multicultural Round - Team Lists"
+_LU_TITLE_ROUND_RE = re.compile(r"Round\s+(\d+)", re.IGNORECASE)
+
 
 def _get_html(url: str) -> str | None:
     """Fetch a URL and return its HTML text, or None on failure."""
@@ -271,8 +275,43 @@ def _validate_records(records: list[dict[str, Any]], source: str) -> bool:
     return True
 
 
-def scrape_league_unlimited(round_number: int, year: int) -> list[dict[str, Any]]:
+def _extract_page_round(html: str) -> int | None:
+    """Extract the actual round number from the LeagueUnlimited page title.
+
+    Parses the ``<h1>`` tag (or ``<title>``) looking for "Round N".
+
+    Parameters
+    ----------
+    html : str
+        Raw HTML content.
+
+    Returns
+    -------
+    int | None
+        Round number found in the page title, or None if not found.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in (soup.find("h1"), soup.find("title")):
+        if tag is None:
+            continue
+        m = _LU_TITLE_ROUND_RE.search(tag.get_text())
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def scrape_league_unlimited(
+    round_number: int,
+    year: int,
+    *,
+    url_override: str | None = None,
+) -> list[dict[str, Any]]:
     """Scrape team lists from LeagueUnlimited for a given round.
+
+    After fetching the page, the ``<h1>`` title is checked to confirm
+    it actually contains data for the requested round.  If LeagueUnlimited
+    has an off-by-one URL mapping (e.g. ``round-3/`` serves Round 2 content),
+    the function automatically retries with ``round-{N+1}/``.
 
     Parameters
     ----------
@@ -280,17 +319,48 @@ def scrape_league_unlimited(round_number: int, year: int) -> list[dict[str, Any]
         NRL round number (1-based).
     year : int
         Season year.
+    url_override : str | None
+        If provided, use this URL instead of the generated one (skips
+        off-by-one correction since the caller knows the correct URL).
 
     Returns
     -------
     list[dict]
         Player records. Empty list if scraping fails or no data found.
     """
-    url = _LU_BASE.format(year=year, round_number=round_number)
-    LOGGER.info("Fetching LeagueUnlimited: %s", url)
+    if url_override:
+        url = url_override
+        LOGGER.info("Fetching LeagueUnlimited (url_override): %s", url)
+    else:
+        url = _LU_BASE.format(year=year, round_number=round_number)
+        LOGGER.info("Fetching LeagueUnlimited: %s", url)
+
     html = _get_html(url)
     if html is None:
         return []
+
+    # --- Title-based round validation (skip if url_override) ---
+    if not url_override:
+        page_round = _extract_page_round(html)
+        if page_round is not None and page_round != round_number:
+            LOGGER.warning(
+                "Off-by-one detected: URL round-%d serves Round %d content. "
+                "Retrying with round-%d/",
+                round_number, page_round, round_number + 1,
+            )
+            corrected_url = _LU_BASE.format(year=year, round_number=round_number + 1)
+            LOGGER.info("Fetching corrected URL: %s", corrected_url)
+            html = _get_html(corrected_url)
+            if html is None:
+                return []
+            # Verify corrected page
+            corrected_round = _extract_page_round(html)
+            if corrected_round is not None and corrected_round != round_number:
+                LOGGER.warning(
+                    "Corrected URL also mismatched: page says Round %d, wanted %d",
+                    corrected_round, round_number,
+                )
+                return []
 
     records = _parse_league_unlimited(html)
     if not _validate_records(records, "LeagueUnlimited"):
@@ -328,7 +398,12 @@ def scrape_nrl_topic_article(round_number: int, year: int) -> list[dict[str, Any
     return records
 
 
-def fetch_team_lists(round_number: int, year: int) -> list[dict[str, Any]]:
+def fetch_team_lists(
+    round_number: int,
+    year: int,
+    *,
+    url_override: str | None = None,
+) -> list[dict[str, Any]]:
     """Fetch team lists for a given round and year.
 
     Tries LeagueUnlimited first (predictable URL). Falls back to nrl.com
@@ -340,6 +415,9 @@ def fetch_team_lists(round_number: int, year: int) -> list[dict[str, Any]]:
         NRL round number (1-based).
     year : int
         Season year.
+    url_override : str | None
+        If provided, passed to ``scrape_league_unlimited`` to use a specific
+        URL instead of the generated one.
 
     Returns
     -------
@@ -354,7 +432,7 @@ def fetch_team_lists(round_number: int, year: int) -> list[dict[str, Any]]:
     """
     LOGGER.info("Fetching team lists for %d Round %d", year, round_number)
 
-    records = scrape_league_unlimited(round_number, year)
+    records = scrape_league_unlimited(round_number, year, url_override=url_override)
     if records:
         LOGGER.info("LeagueUnlimited: %d player records", len(records))
         return records

@@ -436,7 +436,11 @@ def compute_bookmaker_margins(
 
     For each bookmaker, computes the average overround across all matches:
     ``overround = sum(1/odds for all players in a match's ATS market)``
-    ``correction = 1 / overround``
+    ``correction = expected_try_scorers / overround``
+
+    ATS is *not* a mutually exclusive market — multiple players can score
+    tries.  The fair sum of probabilities equals the expected number of
+    unique try scorers (~6.9), not 1.0.
 
     Updates the global ``BOOKMAKER_MARGIN_CORRECTIONS`` dict in-place and
     returns it.
@@ -477,11 +481,14 @@ def compute_bookmaker_margins(
         return dict(BOOKMAKER_MARGIN_CORRECTIONS)
 
     # Average correction per bookmaker
+    # ATS is non-mutually-exclusive: fair sum of probs ≈ expected try scorers
+    from src.odds.devig import DEFAULT_EXPECTED_TRY_SCORERS
+
     corrections: dict[str, float] = {}
     for bk, group in df.groupby("bookmaker"):
         avg_overround = group["overround"].mean()
         if avg_overround > 0:
-            correction = 1.0 / avg_overround
+            correction = DEFAULT_EXPECTED_TRY_SCORERS / avg_overround
             corrections[str(bk)] = round(correction, 4)
             LOGGER.info(
                 "Bookmaker %s: avg overround=%.2f, correction=%.4f (%d matches)",
